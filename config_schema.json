@@ -183,6 +183,27 @@
               "type": "string",
               "description": "Maximum total size of the audio cache before the least-recently-used files are evicted (e.g. '1GB', '500MB'; '0' for unlimited)",
               "default": "1GB"
+            },
+            "download": {
+              "type": "object",
+              "description": "Pacing for on-demand pre-cache downloads (POST /cache/download)",
+              "properties": {
+                "concurrency": {
+                  "type": "integer",
+                  "description": "How many tracks to download at once",
+                  "default": 2
+                },
+                "min_delay_ms": {
+                  "type": "integer",
+                  "description": "Minimum delay in milliseconds between starting each track download",
+                  "default": 1500
+                },
+                "jitter_ms": {
+                  "type": "integer",
+                  "description": "Additional random delay in milliseconds (0..jitter_ms) added to min_delay_ms",
+                  "default": 1000
+                }
+              }
             }
           }
         },
