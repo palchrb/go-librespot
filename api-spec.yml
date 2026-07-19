@@ -44,6 +44,15 @@ components:
         paused:
           description: Start playback as paused
           type: boolean
+    cacheDownload:
+      description: A pre-cache download payload
+      type: object
+      properties:
+        uri:
+          description: >-
+            Spotify URI of the context (playlist, album, artist, track or
+            episode) to download into the cache
+          type: string
 paths:
   /:
     get:
@@ -135,6 +144,20 @@ paths:
         shuffle after play) always begins on the context's first track.
       requestBody:
         $ref: '#/components/schemas/play'
+      responses:
+        200:
+          description: Successful response
+  /cache/download:
+    post:
+      description: >-
+        Download every track of a context (playlist, album, artist, track or
+        episode) into the on-disk cache without playing it, so it can later be
+        played without re-downloading from the CDN. Requires the cache to be
+        enabled. Runs in the background and returns immediately; the download is
+        paced to avoid hammering Spotify. Only the encrypted audio is stored, so
+        the audio key is still required at playback time.
+      requestBody:
+        $ref: '#/components/schemas/cacheDownload'
       responses:
         200:
           description: Successful response

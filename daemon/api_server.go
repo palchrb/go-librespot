@@ -75,6 +75,7 @@ const (
 	ApiRequestTypeAddToQueue          ApiRequestType = "add_to_queue"
 	ApiRequestTypeToken               ApiRequestType = "token"
 	ApiRequestSetDeviceName           ApiRequestType = "set_device_name"
+	ApiRequestTypeCacheDownload       ApiRequestType = "cache_download"
 )
 
 type ApiEventType string
@@ -147,6 +148,10 @@ type ApiRequestDataPlay struct {
 
 type ApiRequestDataNext struct {
 	Uri *string `json:"uri"`
+}
+
+type ApiRequestDataCacheDownload struct {
+	Uri string `json:"uri"`
 }
 
 type apiResponse struct {
@@ -479,6 +484,25 @@ func (s *ConcreteApiServer) serve() {
 		}
 
 		s.handleRequest(ApiRequest{Type: ApiRequestTypePlay, Data: data}, w)
+	})
+	m.HandleFunc("/cache/download", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		var data ApiRequestDataCacheDownload
+		if err := jsonDecode(r, &data); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		if len(data.Uri) == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		s.handleRequest(ApiRequest{Type: ApiRequestTypeCacheDownload, Data: data}, w)
 	})
 	m.HandleFunc("/player/resume", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {

@@ -565,6 +565,12 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 		}
 
 		return nil, nil
+	case ApiRequestTypeCacheDownload:
+		data := req.Data.(ApiRequestDataCacheDownload)
+		// Fire-and-forget: pre-caching a whole context can take a while, so it
+		// runs in the background and the request returns immediately.
+		go p.cacheContext(context.Background(), data.Uri)
+		return nil, nil
 	case ApiRequestTypeGetVolume:
 		return &ApiResponseVolume{
 			Max:   p.app.cfg.VolumeSteps,
