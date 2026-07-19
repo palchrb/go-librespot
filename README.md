@@ -205,6 +205,11 @@ When the cache is enabled, a context can also be pre-cached on demand via the AP
 cache without playing it. The download runs in the background and is paced (via `cache.download`) to avoid hammering
 Spotify. Only the encrypted audio is stored, so playback still requires a valid Spotify session.
 
+To decide when a playlist needs re-caching, `GET /cache/snapshot?uri=spotify:playlist:...` returns the playlist's current
+`snapshot_id` (revision) and track count in a single call. A client can store the last seen `snapshot_id` and only
+trigger a new `POST /cache/download` when it changes. Only playlists have a snapshot; for other URIs `snapshot_id` is
+`null`.
+
 ### Volume synchronization
 
 Various configurations for volume control are available:

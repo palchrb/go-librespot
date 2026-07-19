@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -25,6 +26,7 @@ import (
 	"github.com/devgianlu/go-librespot/dealer"
 	"github.com/devgianlu/go-librespot/player"
 	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
+	playlist4pb "github.com/devgianlu/go-librespot/proto/spotify/playlist4"
 	"github.com/devgianlu/go-librespot/session"
 	"github.com/devgianlu/go-librespot/spclient"
 	"github.com/devgianlu/go-librespot/tracks"
@@ -571,6 +573,26 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 		// runs in the background and the request returns immediately.
 		go p.cacheContext(context.Background(), data.Uri)
 		return nil, nil
+	case ApiRequestTypeCacheSnapshot:
+		data := req.Data.(ApiRequestDataCacheSnapshot)
+		spotId, err := librespot.SpotifyIdFromUri(data.Uri)
+		if err != nil {
+			return nil, ErrBadRequest
+		}
+
+		// Only playlists carry a snapshot/revision. For anything else there is
+		// nothing to compare against, so report a null snapshot.
+		if spotId.Type() != librespot.SpotifyIdTypePlaylist {
+			return &ApiResponseCacheSnapshot{}, nil
+		}
+
+		content, err := p.sess.Spclient().PlaylistSignals(ctx, *spotId, &playlist4pb.ListSignals{}, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed fetching playlist signals: %w", err)
+		}
+
+		snapshotId := hex.EncodeToString(content.Revision)
+		return &ApiResponseCacheSnapshot{SnapshotId: &snapshotId, Length: content.Length}, nil
 	case ApiRequestTypeGetVolume:
 		return &ApiResponseVolume{
 			Max:   p.app.cfg.VolumeSteps,
