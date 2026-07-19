@@ -76,6 +76,7 @@ const (
 	ApiRequestTypeToken               ApiRequestType = "token"
 	ApiRequestSetDeviceName           ApiRequestType = "set_device_name"
 	ApiRequestTypeCacheDownload       ApiRequestType = "cache_download"
+	ApiRequestTypeCacheSnapshot       ApiRequestType = "cache_snapshot"
 )
 
 type ApiEventType string
@@ -152,6 +153,18 @@ type ApiRequestDataNext struct {
 
 type ApiRequestDataCacheDownload struct {
 	Uri string `json:"uri"`
+}
+
+type ApiRequestDataCacheSnapshot struct {
+	Uri string `json:"uri"`
+}
+
+type ApiResponseCacheSnapshot struct {
+	// SnapshotId is the hex-encoded playlist revision, or null when the URI is
+	// not a playlist (albums are immutable, other contexts have no snapshot).
+	SnapshotId *string `json:"snapshot_id"`
+	// Length is the number of tracks in the playlist, when available.
+	Length *int32 `json:"length"`
 }
 
 type apiResponse struct {
@@ -503,6 +516,20 @@ func (s *ConcreteApiServer) serve() {
 		}
 
 		s.handleRequest(ApiRequest{Type: ApiRequestTypeCacheDownload, Data: data}, w)
+	})
+	m.HandleFunc("/cache/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		uri := r.URL.Query().Get("uri")
+		if len(uri) == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		s.handleRequest(ApiRequest{Type: ApiRequestTypeCacheSnapshot, Data: ApiRequestDataCacheSnapshot{Uri: uri}}, w)
 	})
 	m.HandleFunc("/player/resume", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {

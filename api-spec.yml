@@ -161,6 +161,37 @@ paths:
       responses:
         200:
           description: Successful response
+  /cache/snapshot:
+    get:
+      description: >-
+        Return the current snapshot id (playlist revision) and track count for a
+        playlist URI. Clients can compare the snapshot id against a previously
+        stored value to decide whether the playlist changed and needs
+        re-caching. Only playlists have a snapshot; for any other URI the
+        snapshot_id is null.
+      parameters:
+        - name: uri
+          in: query
+          required: true
+          description: Spotify playlist URI
+          schema:
+            type: string
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  snapshot_id:
+                    type: string
+                    nullable: true
+                    description: Hex-encoded playlist revision, or null for non-playlists
+                  length:
+                    type: integer
+                    nullable: true
+                    description: Number of tracks in the playlist
   /player/resume:
     post:
       description: Resume playback (from paused state)
