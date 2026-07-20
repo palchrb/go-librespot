@@ -187,7 +187,7 @@ paths:
                   snapshot_id:
                     type: string
                     nullable: true
-                    description: Hex-encoded playlist revision, or null for non-playlists
+                    description: The playlist snapshot id, or null for non-playlists
                   length:
                     type: integer
                     nullable: true
