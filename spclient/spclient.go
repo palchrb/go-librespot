@@ -422,6 +422,35 @@ func (c *Spclient) PlaylistSignals(ctx context.Context, playlist librespot.Spoti
 	return &protoResp, nil
 }
 
+func (c *Spclient) GetPlaylist(ctx context.Context, playlist librespot.SpotifyId) (*playlist4pb.SelectedListContent, error) {
+	if playlist.Type() != librespot.SpotifyIdTypePlaylist {
+		return nil, fmt.Errorf("invalid type: %s", playlist.Type())
+	}
+
+	resp, err := c.Request(ctx, "GET", fmt.Sprintf("/playlist/v2/playlist/%s", playlist.Base62()), nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("invalid status code from playlist: %d", resp.StatusCode)
+	}
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading response body: %w", err)
+	}
+
+	var protoResp playlist4pb.SelectedListContent
+	if err := proto.Unmarshal(respBytes, &protoResp); err != nil {
+		return nil, fmt.Errorf("failed unmarshalling SelectedListContent: %w", err)
+	}
+
+	return &protoResp, nil
+}
+
 func (c *Spclient) ContextResolve(ctx context.Context, uri string) (*connectpb.Context, error) {
 	resp, err := c.Request(ctx, "GET", fmt.Sprintf("/context-resolve/v1/%s", uri), nil, nil, nil)
 	if err != nil {
