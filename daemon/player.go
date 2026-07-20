@@ -5,13 +5,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"math"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -600,32 +600,18 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 			return &ApiResponseCacheSnapshot{}, nil
 		}
 
-		// Fetch the canonical snapshot_id (and track count) from the Web API.
-		// This is the value Spotify stamps on every playlist change, so a client
-		// can compare it to detect whether the playlist needs re-caching.
-		resp, err := p.sess.Spclient().WebApiRequest(ctx, "GET",
-			fmt.Sprintf("/v1/playlists/%s", spotId.Base62()),
-			url.Values{"fields": {"snapshot_id,tracks(total)"}}, nil, nil)
+		// Fetch the playlist revision from the internal spclient API (the same
+		// infrastructure used for metadata/storage), rather than the public Web
+		// API which is far more aggressively rate-limited. The revision changes
+		// on every playlist edit, so a client can compare it to decide whether
+		// the playlist needs re-caching.
+		content, err := p.sess.Spclient().GetPlaylist(ctx, *spotId)
 		if err != nil {
-			return nil, fmt.Errorf("failed fetching playlist snapshot: %w", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("unexpected status fetching playlist snapshot: %d", resp.StatusCode)
+			return nil, fmt.Errorf("failed fetching playlist: %w", err)
 		}
 
-		var body struct {
-			SnapshotId string `json:"snapshot_id"`
-			Tracks     struct {
-				Total int32 `json:"total"`
-			} `json:"tracks"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			return nil, fmt.Errorf("failed decoding playlist snapshot: %w", err)
-		}
-
-		return &ApiResponseCacheSnapshot{SnapshotId: &body.SnapshotId, Length: &body.Tracks.Total}, nil
+		snapshotId := hex.EncodeToString(content.Revision)
+		return &ApiResponseCacheSnapshot{SnapshotId: &snapshotId, Length: content.Length}, nil
 	case ApiRequestTypeGetVolume:
 		return &ApiResponseVolume{
 			Max:   p.app.cfg.VolumeSteps,
