@@ -44,6 +44,20 @@ components:
         paused:
           description: Start playback as paused
           type: boolean
+        position:
+          description: >-
+            Position in milliseconds to start playback at within the selected
+            track (0 starts from the beginning)
+          type: integer
+    cacheDownload:
+      description: A pre-cache download payload
+      type: object
+      properties:
+        uri:
+          description: >-
+            Spotify URI of the context (playlist, album, artist, track or
+            episode) to download into the cache
+          type: string
 paths:
   /:
     get:
@@ -138,6 +152,51 @@ paths:
       responses:
         200:
           description: Successful response
+  /cache/download:
+    post:
+      description: >-
+        Download every track of a context (playlist, album, artist, track or
+        episode) into the on-disk cache without playing it, so it can later be
+        played without re-downloading from the CDN. Requires the cache to be
+        enabled. Runs in the background and returns immediately; the download is
+        paced to avoid hammering Spotify. Only the encrypted audio is stored, so
+        the audio key is still required at playback time.
+      requestBody:
+        $ref: '#/components/schemas/cacheDownload'
+      responses:
+        200:
+          description: Successful response
+  /cache/snapshot:
+    get:
+      description: >-
+        Return the current snapshot id (playlist revision) and track count for a
+        playlist URI. Clients can compare the snapshot id against a previously
+        stored value to decide whether the playlist changed and needs
+        re-caching. Only playlists have a snapshot; for any other URI the
+        snapshot_id is null.
+      parameters:
+        - name: uri
+          in: query
+          required: true
+          description: Spotify playlist URI
+          schema:
+            type: string
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  snapshot_id:
+                    type: string
+                    nullable: true
+                    description: The playlist snapshot id, or null for non-playlists
+                  length:
+                    type: integer
+                    nullable: true
+                    description: Number of tracks in the playlist
   /player/resume:
     post:
       description: Resume playback (from paused state)

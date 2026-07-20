@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -560,11 +561,57 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 			}
 		}
 
-		if err := p.loadContext(ctx, spotCtx, skipTo, data.Paused, true); err != nil {
+		// When starting at a position, load paused and seek before unpausing so
+		// no audio plays from 0:00 while the track loads. loadContext returns
+		// once the track is loaded, so no polling is needed to time the seek.
+		loadPaused := data.Paused || data.Position > 0
+		if err := p.loadContext(ctx, spotCtx, skipTo, loadPaused, true); err != nil {
 			return nil, fmt.Errorf("failed loading context: %w", err)
 		}
 
+		if data.Position > 0 {
+			if err := p.seek(ctx, data.Position); err != nil {
+				p.app.log.WithError(err).Warnf("failed seeking to initial position %dms", data.Position)
+			}
+			if !data.Paused {
+				if err := p.play(ctx); err != nil {
+					p.app.log.WithError(err).Warnf("failed resuming after initial seek")
+				}
+			}
+		}
+
 		return nil, nil
+	case ApiRequestTypeCacheDownload:
+		data := req.Data.(ApiRequestDataCacheDownload)
+		// Fire-and-forget: pre-caching a whole context can take a while, so it
+		// runs in the background and the request returns immediately.
+		go p.cacheContext(context.Background(), data.Uri)
+		return nil, nil
+	case ApiRequestTypeCacheSnapshot:
+		data := req.Data.(ApiRequestDataCacheSnapshot)
+		spotId, err := librespot.SpotifyIdFromUri(data.Uri)
+		if err != nil {
+			return nil, ErrBadRequest
+		}
+
+		// Only playlists carry a snapshot/revision. For anything else there is
+		// nothing to compare against, so report a null snapshot.
+		if spotId.Type() != librespot.SpotifyIdTypePlaylist {
+			return &ApiResponseCacheSnapshot{}, nil
+		}
+
+		// Fetch the playlist revision from the internal spclient API (the same
+		// infrastructure used for metadata/storage), rather than the public Web
+		// API which is far more aggressively rate-limited. The revision changes
+		// on every playlist edit, so a client can compare it to decide whether
+		// the playlist needs re-caching.
+		content, err := p.sess.Spclient().GetPlaylist(ctx, *spotId)
+		if err != nil {
+			return nil, fmt.Errorf("failed fetching playlist: %w", err)
+		}
+
+		snapshotId := hex.EncodeToString(content.Revision)
+		return &ApiResponseCacheSnapshot{SnapshotId: &snapshotId, Length: content.Length}, nil
 	case ApiRequestTypeGetVolume:
 		return &ApiResponseVolume{
 			Max:   p.app.cfg.VolumeSteps,

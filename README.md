@@ -194,7 +194,21 @@ cache:
   enabled: false # Whether to cache downloaded audio files (default: false)
   dir: '' # Directory for cached files (default: the XDG cache directory, e.g. $XDG_CACHE_HOME/go-librespot or $HOME/.cache/go-librespot)
   size_limit: '1GB' # Maximum total cache size before evicting least-recently-used files ('0' for unlimited)
+  download: # Pacing for on-demand pre-cache downloads (POST /cache/download)
+    concurrency: 2 # How many tracks to download at once
+    min_delay_ms: 1500 # Minimum delay between starting each track download
+    jitter_ms: 1000 # Additional random delay (0..jitter_ms) added to min_delay_ms
 ```
+
+When the cache is enabled, a context can also be pre-cached on demand via the API server: `POST /cache/download` with
+`{"uri": "spotify:playlist:..."}` downloads every track of the given playlist, album, artist, track or episode into the
+cache without playing it. The download runs in the background and is paced (via `cache.download`) to avoid hammering
+Spotify. Only the encrypted audio is stored, so playback still requires a valid Spotify session.
+
+To decide when a playlist needs re-caching, `GET /cache/snapshot?uri=spotify:playlist:...` returns the playlist's current
+`snapshot_id` (revision) and track count in a single call. A client can store the last seen `snapshot_id` and only
+trigger a new `POST /cache/download` when it changes. Only playlists have a snapshot; for other URIs `snapshot_id` is
+`null`.
 
 ### Volume synchronization
 

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/devgianlu/go-librespot/daemon"
 	"github.com/gofrs/flock"
@@ -77,6 +78,11 @@ type cliConfig struct {
 		Enabled   bool   `koanf:"enabled"`
 		Dir       string `koanf:"dir"`
 		SizeLimit string `koanf:"size_limit"`
+		Download  struct {
+			Concurrency int `koanf:"concurrency"`
+			MinDelayMs  int `koanf:"min_delay_ms"`
+			JitterMs    int `koanf:"jitter_ms"`
+		} `koanf:"download"`
 	} `koanf:"cache"`
 
 	Credentials struct {
@@ -143,6 +149,9 @@ func (c *cliConfig) toDaemonConfig() *daemon.Config {
 	}
 	// The value is validated in loadCLIConfig, so the error is unreachable here.
 	dc.Cache.SizeLimit, _ = parseSize(c.Cache.SizeLimit)
+	dc.Cache.Download.Concurrency = c.Cache.Download.Concurrency
+	dc.Cache.Download.MinDelay = time.Duration(c.Cache.Download.MinDelayMs) * time.Millisecond
+	dc.Cache.Download.Jitter = time.Duration(c.Cache.Download.JitterMs) * time.Millisecond
 	dc.Credentials.Type = c.Credentials.Type
 	dc.Credentials.Interactive.CallbackPort = c.Credentials.Interactive.CallbackPort
 	dc.Credentials.SpotifyToken.Username = c.Credentials.SpotifyToken.Username
@@ -203,6 +212,10 @@ func loadCLIConfig(cfg *cliConfig) error {
 
 		"cache.enabled":    false,
 		"cache.size_limit": "1GB",
+
+		"cache.download.concurrency":  2,
+		"cache.download.min_delay_ms": 1500,
+		"cache.download.jitter_ms":    1000,
 
 		"zeroconf_backend": "builtin",
 
