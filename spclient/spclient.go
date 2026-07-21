@@ -451,6 +451,41 @@ func (c *Spclient) GetPlaylist(ctx context.Context, playlist librespot.SpotifyId
 	return &protoResp, nil
 }
 
+// GetRootlist fetches the user's root playlist list (the "rootlist") from the
+// internal spclient API. This is the list of playlists the user owns or
+// follows, including folder boundary markers (spotify:start-group: and
+// spotify:end-group: URIs). It uses the same internal infrastructure as
+// GetPlaylist rather than the public Web API, which is far more aggressively
+// rate-limited.
+func (c *Spclient) GetRootlist(ctx context.Context, username string) (*playlist4pb.SelectedListContent, error) {
+	if len(username) == 0 {
+		return nil, fmt.Errorf("empty username")
+	}
+
+	resp, err := c.Request(ctx, "GET", fmt.Sprintf("/playlist/v2/user/%s/rootlist", url.PathEscape(username)), nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("invalid status code from rootlist: %d", resp.StatusCode)
+	}
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading response body: %w", err)
+	}
+
+	var protoResp playlist4pb.SelectedListContent
+	if err := proto.Unmarshal(respBytes, &protoResp); err != nil {
+		return nil, fmt.Errorf("failed unmarshalling SelectedListContent: %w", err)
+	}
+
+	return &protoResp, nil
+}
+
 func (c *Spclient) ContextResolve(ctx context.Context, uri string) (*connectpb.Context, error) {
 	resp, err := c.Request(ctx, "GET", fmt.Sprintf("/context-resolve/v1/%s", uri), nil, nil, nil)
 	if err != nil {

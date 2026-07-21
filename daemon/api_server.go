@@ -77,6 +77,7 @@ const (
 	ApiRequestSetDeviceName           ApiRequestType = "set_device_name"
 	ApiRequestTypeCacheDownload       ApiRequestType = "cache_download"
 	ApiRequestTypeCacheSnapshot       ApiRequestType = "cache_snapshot"
+	ApiRequestTypePlaylists           ApiRequestType = "playlists"
 )
 
 type ApiEventType string
@@ -168,6 +169,26 @@ type ApiResponseCacheSnapshot struct {
 	SnapshotId *string `json:"snapshot_id"`
 	// Length is the number of tracks in the playlist, when available.
 	Length *int32 `json:"length"`
+}
+
+// ApiResponsePlaylistItem is a single entry in the user's rootlist. Uri is a
+// playlist URI (spotify:playlist:...) for normal entries, or a folder boundary
+// marker (spotify:start-group:... / spotify:end-group:...) preserving the
+// folder structure. Name and cover art are not carried by the rootlist and
+// must be resolved per-playlist if needed.
+type ApiResponsePlaylistItem struct {
+	Uri string `json:"uri"`
+}
+
+type ApiResponsePlaylists struct {
+	// Revision is the hex-encoded rootlist revision. It changes whenever the
+	// user adds, removes or reorders playlists, so a client can cache the list
+	// and skip re-enumeration when the revision is unchanged.
+	Revision string `json:"revision"`
+	// Length is the number of entries reported by the rootlist.
+	Length int32 `json:"length"`
+	// Items are the rootlist entries in order, including folder markers.
+	Items []ApiResponsePlaylistItem `json:"items"`
 }
 
 type apiResponse struct {
@@ -533,6 +554,14 @@ func (s *ConcreteApiServer) serve() {
 		}
 
 		s.handleRequest(ApiRequest{Type: ApiRequestTypeCacheSnapshot, Data: ApiRequestDataCacheSnapshot{Uri: uri}}, w)
+	})
+	m.HandleFunc("/playlists", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		s.handleRequest(ApiRequest{Type: ApiRequestTypePlaylists}, w)
 	})
 	m.HandleFunc("/player/resume", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {

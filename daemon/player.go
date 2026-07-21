@@ -612,6 +612,29 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 
 		snapshotId := hex.EncodeToString(content.Revision)
 		return &ApiResponseCacheSnapshot{SnapshotId: &snapshotId, Length: content.Length}, nil
+	case ApiRequestTypePlaylists:
+		// Fetch the user's playlist list ("rootlist") from the internal spclient
+		// API rather than the public Web API, which is far more aggressively
+		// rate-limited. The rootlist carries only the playlist URIs and folder
+		// markers in order; names and cover art must be resolved per-playlist.
+		content, err := p.sess.Spclient().GetRootlist(ctx, p.sess.Username())
+		if err != nil {
+			return nil, fmt.Errorf("failed fetching rootlist: %w", err)
+		}
+
+		resp := &ApiResponsePlaylists{
+			Revision: hex.EncodeToString(content.Revision),
+			Items:    []ApiResponsePlaylistItem{},
+		}
+		if content.Length != nil {
+			resp.Length = *content.Length
+		}
+		if content.Contents != nil {
+			for _, item := range content.Contents.Items {
+				resp.Items = append(resp.Items, ApiResponsePlaylistItem{Uri: item.GetUri()})
+			}
+		}
+		return resp, nil
 	case ApiRequestTypeGetVolume:
 		return &ApiResponseVolume{
 			Max:   p.app.cfg.VolumeSteps,

@@ -197,6 +197,43 @@ paths:
                     type: integer
                     nullable: true
                     description: Number of tracks in the playlist
+  /playlists:
+    get:
+      description: >-
+        Return the list of playlists the logged-in user owns or follows (the
+        "rootlist"), fetched from the internal Spotify API rather than the
+        public Web API to avoid its aggressive rate limits. Items are returned
+        in order and include folder boundary markers (spotify:start-group: and
+        spotify:end-group: URIs), preserving the folder structure. Only the
+        playlist URIs are returned; names and cover art are not carried by the
+        rootlist and must be resolved per playlist if needed. The revision can
+        be cached and compared to skip re-enumeration when the list is
+        unchanged.
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  revision:
+                    type: string
+                    description: Hex-encoded rootlist revision (changes on any add/remove/reorder)
+                  length:
+                    type: integer
+                    description: Number of entries reported by the rootlist
+                  items:
+                    type: array
+                    description: Rootlist entries in order, including folder markers
+                    items:
+                      type: object
+                      properties:
+                        uri:
+                          type: string
+                          description: >-
+                            Playlist URI (spotify:playlist:...) or a folder
+                            marker (spotify:start-group:... / spotify:end-group:...)
   /player/resume:
     post:
       description: Resume playback (from paused state)
