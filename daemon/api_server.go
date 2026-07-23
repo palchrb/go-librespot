@@ -270,6 +270,10 @@ type ApiResponseStatus struct {
 	RepeatTrack    bool                    `json:"repeat_track"`
 	ShuffleContext bool                    `json:"shuffle_context"`
 	Track          *ApiResponseStatusTrack `json:"track"`
+	// PendingTrackUri is the track selected by a not-yet-settled skip (its load
+	// is deferred while the user is still browsing); null otherwise. The track
+	// object still describes the last loaded stream.
+	PendingTrackUri *string `json:"pending_track_uri,omitempty"`
 }
 
 type ApiResponseRoot struct {

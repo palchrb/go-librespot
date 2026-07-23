@@ -23,6 +23,12 @@ import (
 )
 
 func (p *AppPlayer) prefetchNext(ctx context.Context) {
+	// A deferred skip is waiting: prefetching would perform the exact network
+	// requests (audio key included) the settle is deferring.
+	if p.settlePending {
+		return
+	}
+
 	// Limit ourselves to 30 seconds for prefetching
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -193,6 +199,13 @@ func (p *AppPlayer) handlePlayerEvent(ctx context.Context, ev *player.Event) {
 			},
 		})
 	case player.EventTypeNotPlaying:
+		// A deferred skip already moved the pointer past this track; the settle
+		// timer will load it. Advancing here would advance a second time.
+		if p.settlePending {
+			p.app.log.Tracef("ignoring not playing event during pending settle")
+			break
+		}
+
 		p.sess.Events().OnPlayerEnd(p.primaryStream, p.state.trackPosition())
 
 		p.app.server.Emit(&ApiEvent{
@@ -220,6 +233,13 @@ func (p *AppPlayer) handlePlayerEvent(ctx context.Context, ev *player.Event) {
 			p.emitMprisUpdate(mpris.Stopped)
 		}
 	case player.EventTypeStop:
+		// The output closed while a deferred load is pending; the settle will
+		// re-open it, so this is not a terminal stop.
+		if p.settlePending {
+			p.app.log.Tracef("ignoring stop event during pending settle")
+			break
+		}
+
 		p.app.server.Emit(&ApiEvent{
 			Type: ApiEventTypeStopped,
 			Data: ApiEventDataStopped{
@@ -235,6 +255,9 @@ func (p *AppPlayer) handlePlayerEvent(ctx context.Context, ev *player.Event) {
 type skipToFunc func(*connectpb.ContextTrack) bool
 
 func (p *AppPlayer) loadContext(ctx context.Context, spotCtx *connectpb.Context, skipTo skipToFunc, paused, drop bool) error {
+	// A new context supersedes any deferred skip or key-retry backoff.
+	p.cancelSettle()
+
 	ctxTracks, err := tracks.NewTrackListFromContext(ctx, p.app.log, p.sess.Spclient(), spotCtx)
 	if err != nil {
 		return fmt.Errorf("failed creating track list: %w", err)
@@ -564,6 +587,14 @@ func (p *AppPlayer) pause(ctx context.Context) error {
 }
 
 func (p *AppPlayer) seek(ctx context.Context, position int64) error {
+	// A deferred skip is waiting: load it now so the seek targets the track the
+	// pointer is on, not the stale stream from before the burst.
+	if p.settlePending {
+		if err := p.settleNow(ctx); err != nil {
+			return fmt.Errorf("failed settling before seek: %w", err)
+		}
+	}
+
 	if p.primaryStream == nil {
 		return fmt.Errorf("no primary stream")
 	}
@@ -603,8 +634,89 @@ func (p *AppPlayer) seek(ctx context.Context, position int64) error {
 	return nil
 }
 
+// shouldDeferSkip reports whether this skip is part of a burst and its load should be
+// debounced: a settle is already pending, or the previous skip finished less than
+// SkipDebounce ago. The first skip of a burst always loads immediately (leading edge),
+// so single presses keep today's behavior exactly; a zero SkipDebounce disables
+// debouncing entirely.
+func (p *AppPlayer) shouldDeferSkip() bool {
+	// Without a context there is no pointer to move and no track to publish
+	// (deferSettle needs state.player.Track); the inline path handles the
+	// no-context case safely.
+	if p.state.tracks == nil {
+		return false
+	}
+
+	d := p.app.cfg.SkipDebounce
+	return d > 0 && (p.settlePending || time.Since(p.lastSkipDone) < d)
+}
+
+// deferSettle publishes the pending pointer position (will_play event + coalesced state
+// PUT) and (re)arms the settle timer. Runs after every deferred pointer move.
+func (p *AppPlayer) deferSettle(ctx context.Context) {
+	p.settlePending = true
+	p.settleTimer.Reset(p.app.cfg.SkipDebounce)
+	p.lastSkipDone = time.Now()
+
+	// Publish the pending track without a stream: buffering, position 0.
+	p.state.updateTimestamp()
+	p.state.player.IsPlaying = true
+	p.state.player.IsBuffering = true
+	p.state.player.PlaybackSpeed = 0
+	p.updateState(ctx)
+
+	p.app.server.Emit(&ApiEvent{
+		Type: ApiEventTypeWillPlay,
+		Data: ApiEventDataWillPlay{
+			ContextUri: p.state.player.ContextUri,
+			Uri:        p.state.player.Track.Uri,
+			PlayOrigin: p.state.playOrigin(),
+		},
+	})
+}
+
+// settleNow loads whatever track the pointer currently points at. Called from the Run
+// loop when the settle timer fires, or inline for non-burst skips and seek flushes.
+func (p *AppPlayer) settleNow(ctx context.Context) error {
+	p.settleTimer.Stop()
+	p.settlePending = false
+	atEnd := p.settleAtEnd
+	p.settleAtEnd = false
+
+	if p.state.tracks == nil && !atEnd {
+		return nil
+	}
+
+	hasNextTrack, err := p.finishAdvance(ctx, !atEnd, true)
+	if err != nil {
+		return err
+	}
+
+	// if no track to be played, just stop
+	if !hasNextTrack {
+		p.app.server.Emit(&ApiEvent{
+			Type: ApiEventTypeStopped,
+			Data: ApiEventDataStopped{
+				PlayOrigin: p.state.playOrigin(),
+			},
+		})
+	}
+
+	return nil
+}
+
+// cancelSettle abandons a pending deferred load: whatever superseded it (new
+// context, transfer, stop) owns playback now.
+func (p *AppPlayer) cancelSettle() {
+	p.settleTimer.Stop()
+	p.settlePending = false
+	p.settleAtEnd = false
+}
+
 func (p *AppPlayer) skipPrev(ctx context.Context, allowSeeking bool) error {
-	if allowSeeking && p.player.PositionMs() > 3000 {
+	// The old stream's position is meaningless while a settle is pending: a
+	// restart-current-track seek must not fire mid-burst.
+	if allowSeeking && !p.settlePending && p.player.PositionMs() > 3000 {
 		return p.seek(ctx, 0)
 	}
 
@@ -623,11 +735,18 @@ func (p *AppPlayer) skipPrev(ctx context.Context, allowSeeking bool) error {
 	p.state.player.Timestamp = time.Now().UnixMilli()
 	p.state.player.PositionAsOfTimestamp = 0
 
-	// load current track into stream
-	if err := p.loadCurrentTrack(ctx, p.state.player.IsPaused, true); err != nil {
-		return fmt.Errorf("failed loading current track (skip prev): %w", err)
+	p.settleAtEnd = false
+
+	if p.shouldDeferSkip() {
+		p.deferSettle(ctx)
+		return nil
 	}
 
+	err := p.settleNow(ctx)
+	p.lastSkipDone = time.Now()
+	if err != nil {
+		return fmt.Errorf("failed loading current track (skip prev): %w", err)
+	}
 	return nil
 }
 
@@ -648,28 +767,23 @@ func (p *AppPlayer) skipNext(ctx context.Context, track *connectpb.ContextTrack)
 		p.state.player.NextTracks = p.state.tracks.NextTracks(ctx, nil)
 		p.state.player.Index = p.state.tracks.Index()
 
-		if err := p.loadCurrentTrack(ctx, p.state.player.IsPaused, true); err != nil {
-			return err
-		}
-		return nil
+		p.settleAtEnd = false
 	} else {
-		hasNextTrack, err := p.advanceNext(ctx, true, true)
-		if err != nil {
-			return fmt.Errorf("failed skipping to next track: %w", err)
-		}
+		hasNextTrack := p.advancePointerNext(ctx, true)
+		p.settleAtEnd = !hasNextTrack
+	}
 
-		// if no track to be played, just stop
-		if !hasNextTrack {
-			p.app.server.Emit(&ApiEvent{
-				Type: ApiEventTypeStopped,
-				Data: ApiEventDataStopped{
-					PlayOrigin: p.state.playOrigin(),
-				},
-			})
-		}
-
+	if p.shouldDeferSkip() {
+		p.deferSettle(ctx)
 		return nil
 	}
+
+	err := p.settleNow(ctx)
+	p.lastSkipDone = time.Now()
+	if err != nil {
+		return fmt.Errorf("failed skipping to next track: %w", err)
+	}
+	return nil
 }
 
 // maxConsecutiveUnplayableSkips caps how many refused/restricted tracks advanceNext will skip
@@ -677,7 +791,14 @@ func (p *AppPlayer) skipNext(ctx context.Context, track *connectpb.ContextTrack)
 const maxConsecutiveUnplayableSkips = 50
 
 func (p *AppPlayer) advanceNext(ctx context.Context, forceNext, drop bool) (bool, error) {
-	var uri string
+	hasNextTrack := p.advancePointerNext(ctx, forceNext)
+	return p.finishAdvance(ctx, hasNextTrack, drop)
+}
+
+// advancePointerNext moves the track pointer forward (repeat-track, queue and
+// end-of-context rules) without loading anything, and reports whether a next
+// track is available to play.
+func (p *AppPlayer) advancePointerNext(ctx context.Context, forceNext bool) bool {
 	var hasNextTrack bool
 	if p.state.tracks != nil {
 		if !forceNext && p.state.player.Options.RepeatingTrack {
@@ -704,12 +825,21 @@ func (p *AppPlayer) advanceNext(ctx context.Context, forceNext, drop bool) (bool
 		p.state.player.PrevTracks = p.state.tracks.PrevTracks()
 		p.state.player.NextTracks = p.state.tracks.NextTracks(ctx, nil)
 		p.state.player.Index = p.state.tracks.Index()
-
-		uri = p.state.player.Track.Uri
 	}
 
 	p.state.player.Timestamp = time.Now().UnixMilli()
 	p.state.player.PositionAsOfTimestamp = 0
+
+	return hasNextTrack
+}
+
+// finishAdvance loads the track the pointer is currently on: autoplay resolution when
+// the context ended and the bounded unplayable walk.
+func (p *AppPlayer) finishAdvance(ctx context.Context, hasNextTrack, drop bool) (bool, error) {
+	var uri string
+	if p.state.tracks != nil {
+		uri = p.state.player.Track.Uri
+	}
 
 	if !hasNextTrack && !p.app.cfg.DisableAutoplay && !strings.HasPrefix(p.state.player.ContextUri, "spotify:station:") {
 		p.state.player.Suppressions = &connectpb.Suppressions{}
@@ -752,15 +882,22 @@ func (p *AppPlayer) advanceNext(ctx context.Context, forceNext, drop bool) (bool
 		p.state.player.IsBuffering = false
 	}
 
-	// load current track into stream.
-	//
+	// load current track into stream. The paused state was already decided by the pointer
+	// move (advancePointerNext sets IsPaused, skip/settle paths preserve the user's), so
+	// respect it; a context that ended without repeat additionally loads paused.
+	err := p.loadCurrentTrack(ctx, p.state.player.IsPaused || !hasNextTrack, drop)
+	if err == nil {
+		p.consecutiveUnplayableSkips = 0
+		return hasNextTrack, nil
+	}
+
 	// BAND-AID: Spotify makes a per-track, context-dependent decision on granting the legacy
 	// AES audio key. License-gated tracks are refused (AesKeyError, e.g. code 1) in ordinary
 	// playlist playback — even though they play on official clients, which establish a licensed
 	// context. We cannot decrypt a refused track, so skip it instead of freezing the player.
 	// Remove once proper key licensing (PlayPlay) is implemented — tracked separately.
 	var keyErr *audio.KeyProviderError
-	if err := p.loadCurrentTrack(ctx, !hasNextTrack, drop); errors.Is(err, librespot.ErrMediaRestricted) || errors.Is(err, librespot.ErrNoSupportedFormats) || errors.As(err, &keyErr) {
+	if errors.Is(err, librespot.ErrMediaRestricted) || errors.Is(err, librespot.ErrNoSupportedFormats) || errors.As(err, &keyErr) {
 		if keyErr != nil {
 			p.app.log.WithError(err).Warnf("skipping track: Spotify refused the audio key (code %d) for this playback context: %s", keyErr.Code, uri)
 		} else {
@@ -777,13 +914,10 @@ func (p *AppPlayer) advanceNext(ctx context.Context, forceNext, drop bool) (bool
 			return false, err
 		}
 		return p.advanceNext(ctx, true, drop)
-	} else if err != nil {
-		p.consecutiveUnplayableSkips = 0
-		return false, fmt.Errorf("failed loading current track (advance to %s): %w", uri, err)
 	}
 
 	p.consecutiveUnplayableSkips = 0
-	return hasNextTrack, nil
+	return false, fmt.Errorf("failed loading current track (advance to %s): %w", uri, err)
 }
 
 // Return the volume as an integer in the range 0..player.MaxStateVolume, as
@@ -840,6 +974,8 @@ func (p *AppPlayer) volumeUpdated(ctx context.Context) {
 }
 
 func (p *AppPlayer) stopPlayback(ctx context.Context) error {
+	p.cancelSettle()
+
 	p.player.Stop()
 	p.primaryStream = nil
 	p.secondaryStream = nil
