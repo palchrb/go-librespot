@@ -683,6 +683,11 @@ func (p *AppPlayer) settleNow(ctx context.Context) error {
 	atEnd := p.settleAtEnd
 	p.settleAtEnd = false
 
+	// The time spent waiting for the settle timer is not playback: refresh the
+	// timestamp (PlaybackSpeed is 0 while pending, so the position stays put)
+	// so the track loads at its actual position instead of position+debounce.
+	p.state.updateTimestamp()
+
 	if p.state.tracks == nil && !atEnd {
 		return nil
 	}
