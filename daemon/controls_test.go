@@ -162,6 +162,28 @@ func TestSettleNowAtEndWithoutContext(t *testing.T) {
 	}
 }
 
+// TestSettleWaitIsNotPlayback locks in the position fix: the time spent
+// waiting for the settle timer must not count as playback, otherwise the
+// settled track starts ~debounce ms into the song instead of at 0:00.
+func TestSettleWaitIsNotPlayback(t *testing.T) {
+	p, _ := newSettleTestPlayer(t, 400*time.Millisecond)
+
+	// State as a deferred skip leaves it, with the settle wait elapsed.
+	p.deferSettle(context.Background())
+	p.state.player.Timestamp = time.Now().Add(-450 * time.Millisecond).UnixMilli()
+	p.state.player.PositionAsOfTimestamp = 0
+
+	// No context: settleNow returns early, but must have refreshed the
+	// timestamp first so the wait is discarded.
+	if err := p.settleNow(context.Background()); err != nil {
+		t.Fatalf("settleNow failed: %v", err)
+	}
+
+	if pos := p.state.trackPosition(); pos > 50 {
+		t.Fatalf("expected the settle wait to be discarded from the position, got %dms", pos)
+	}
+}
+
 func TestCancelSettleClearsEverything(t *testing.T) {
 	p, _ := newSettleTestPlayer(t, 400*time.Millisecond)
 	p.settlePending = true
