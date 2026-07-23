@@ -607,8 +607,12 @@ func (p *AppPlayer) pause(ctx context.Context) error {
 
 func (p *AppPlayer) seek(ctx context.Context, position int64) error {
 	// A deferred skip is waiting: load it now so the seek targets the track the
-	// pointer is on, not the stale stream from before the burst.
-	if p.settlePending {
+	// pointer is on, not the stale stream from before the burst. A key-retry
+	// backoff (keyRetries > 0) must NOT be flushed early though — reloading
+	// immediately while the account is throttled would burn the retry and stop
+	// playback; let the backoff run and accept the seek landing on whatever
+	// stream is current.
+	if p.settlePending && p.keyRetries == 0 {
 		if err := p.settleNow(ctx); err != nil {
 			return fmt.Errorf("failed settling before seek: %w", err)
 		}
@@ -659,6 +663,13 @@ func (p *AppPlayer) seek(ctx context.Context, position int64) error {
 // so single presses keep today's behavior exactly; a zero SkipDebounce disables
 // debouncing entirely.
 func (p *AppPlayer) shouldDeferSkip() bool {
+	// Without a context there is no pointer to move and no track to publish
+	// (deferSettle needs state.player.Track); the inline path handles the
+	// no-context case safely.
+	if p.state.tracks == nil {
+		return false
+	}
+
 	d := p.app.cfg.SkipDebounce
 	return d > 0 && (p.settlePending || time.Since(p.lastSkipDone) < d)
 }
@@ -704,8 +715,9 @@ func (p *AppPlayer) settleNow(ctx context.Context) error {
 		return err
 	}
 
-	// if no track to be played, just stop
-	if !hasNextTrack {
+	// if no track to be played, just stop — unless the circuit breaker armed a
+	// key retry (settlePending again), in which case audio may still come.
+	if !hasNextTrack && !p.settlePending {
 		p.app.server.Emit(&ApiEvent{
 			Type: ApiEventTypeStopped,
 			Data: ApiEventDataStopped{
@@ -930,6 +942,9 @@ func (p *AppPlayer) finishAdvance(ctx context.Context, hasNextTrack, drop bool) 
 		if p.keyRetries < maxKeyErrorRetries {
 			p.keyRetries++
 			p.settlePending = true
+			// Preserve the end-of-context flag so the retry re-runs this exact
+			// load (same paused/stop semantics), not a fresh mid-context one.
+			p.settleAtEnd = !hasNextTrack
 			p.settleTimer.Reset(keyErrorRetryBackoff)
 			p.app.log.WithError(err).Warnf("audio key throttled, retrying %s in %s (attempt %d)",
 				uri, keyErrorRetryBackoff, p.keyRetries)

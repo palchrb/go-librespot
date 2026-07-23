@@ -12,6 +12,7 @@ import (
 	librespot "github.com/devgianlu/go-librespot"
 	"github.com/devgianlu/go-librespot/audio"
 	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
+	"github.com/devgianlu/go-librespot/tracks"
 )
 
 // recordingApiServer is an ApiServer that records emitted events, so tests can
@@ -72,20 +73,25 @@ func TestShouldDeferSkip(t *testing.T) {
 	cases := []struct {
 		name          string
 		debounce      time.Duration
+		hasContext    bool
 		settlePending bool
 		lastSkipDone  time.Time
 		want          bool
 	}{
-		{"disabled never defers", 0, true, time.Now(), false},
-		{"first skip is immediate", 400 * time.Millisecond, false, time.Time{}, false},
-		{"skip after quiet period is immediate", 400 * time.Millisecond, false, time.Now().Add(-time.Second), false},
-		{"pending settle defers", 400 * time.Millisecond, true, time.Time{}, true},
-		{"skip right after previous defers", 400 * time.Millisecond, false, time.Now(), true},
+		{"disabled never defers", 0, true, true, time.Now(), false},
+		{"no context never defers", 400 * time.Millisecond, false, true, time.Now(), false},
+		{"first skip is immediate", 400 * time.Millisecond, true, false, time.Time{}, false},
+		{"skip after quiet period is immediate", 400 * time.Millisecond, true, false, time.Now().Add(-time.Second), false},
+		{"pending settle defers", 400 * time.Millisecond, true, true, time.Time{}, true},
+		{"skip right after previous defers", 400 * time.Millisecond, true, false, time.Now(), true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p, _ := newSettleTestPlayer(t, tc.debounce)
+			if tc.hasContext {
+				p.state.tracks = &tracks.List{}
+			}
 			p.settlePending = tc.settlePending
 			p.lastSkipDone = tc.lastSkipDone
 
@@ -131,6 +137,28 @@ func TestSettleNowWithoutContextIsNoop(t *testing.T) {
 	}
 	if events := server.snapshot(); len(events) != 0 {
 		t.Fatalf("expected no events, got %v", events)
+	}
+}
+
+// TestSettleNowAtEndWithoutContext locks in the no-context end-of-context
+// path: a deferred skip past the end with no track list must not panic and
+// must tell clients playback stopped.
+func TestSettleNowAtEndWithoutContext(t *testing.T) {
+	p, server := newSettleTestPlayer(t, 400*time.Millisecond)
+	p.state.player.Track = nil // fresh state: no track ever loaded
+	p.settlePending = true
+	p.settleAtEnd = true
+
+	if err := p.settleNow(context.Background()); err != nil {
+		t.Fatalf("settleNow at end without context failed: %v", err)
+	}
+	if p.settlePending || p.settleAtEnd {
+		t.Fatal("expected settle flags cleared")
+	}
+
+	events := server.snapshot()
+	if len(events) != 1 || events[0] != ApiEventTypeStopped {
+		t.Fatalf("expected exactly one stopped event, got %v", events)
 	}
 }
 

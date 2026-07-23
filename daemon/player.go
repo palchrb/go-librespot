@@ -863,9 +863,27 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 				break
 			}
 
-			if err := p.settleNow(ctx); err != nil {
+			// Limit ourselves to 30 seconds like every other load path: a
+			// hanging network call here would block the whole control loop.
+			settleCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			if err := p.settleNow(settleCtx); err != nil {
 				p.app.log.WithError(err).Error("failed loading settled track")
+
+				// No caller sees this error. Unless the circuit breaker armed a
+				// retry (settlePending again) or already stopped playback, tell
+				// clients audio is not coming instead of stranding them on a
+				// forever-buffering state.
+				if !p.settlePending && p.state.player.IsPlaying {
+					p.state.player.IsPlaying = false
+					p.state.player.IsBuffering = false
+					p.updateState(settleCtx)
+					p.app.server.Emit(&ApiEvent{
+						Type: ApiEventTypeStopped,
+						Data: ApiEventDataStopped{PlayOrigin: p.state.playOrigin()},
+					})
+				}
 			}
+			cancel()
 		case volume := <-p.volumeUpdate:
 			// Received a new volume: from Spotify Connect, from the REST API,
 			// or from the system volume mixer.
