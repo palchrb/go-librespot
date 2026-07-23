@@ -225,6 +225,8 @@ func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err 
 	appPlayer.settleTimer = time.NewTimer(math.MaxInt64)
 	appPlayer.settleTimer.Stop()
 
+	appPlayer.metaCache = newTrackMetaCache()
+
 	if appPlayer.sess, err = session.NewSessionFromOptions(ctx, &session.Options{
 		Log:         app.log,
 		DeviceType:  app.deviceType,

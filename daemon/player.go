@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/devgianlu/go-librespot/mpris"
@@ -86,6 +87,12 @@ type AppPlayer struct {
 	// of refused tracks (even at the very start of a context) advances to the first playable
 	// one instead of freezing, and can never loop forever. Reset to 0 on any successful load.
 	consecutiveUnplayableSkips int
+
+	// metaCache holds metadata for tracks around the playback position so /status can
+	// describe tracks whose stream is not loaded yet (pending skips, the upcoming track).
+	metaCache *trackMetaCache
+	// metaFetchInFlight single-flights the background metadata batch fetch.
+	metaFetchInFlight atomic.Bool
 }
 
 func (p *AppPlayer) playbackReady() bool {
@@ -305,6 +312,10 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 		p.state.player.NextTracks = ctxTracks.NextTracks(ctx, nil)
 		p.state.player.Index = ctxTracks.Index()
 
+		// Fetch metadata for the transferred window in the background while the
+		// track loads, so names and cover art are known before the user skips.
+		p.scheduleMetaPrefetch()
+
 		// load current track into stream — skip forward if the transferred track is unplayable
 		// (Spotify refused its key / restricted), so a cast onto a refused track doesn't freeze.
 		if err := p.loadCurrentTrackOrSkip(ctx, pause, true); err != nil {
@@ -508,9 +519,23 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 		}
 
 		// While a deferred skip awaits its load, the track object above still
-		// describes the last loaded stream; expose the pointer's target too.
+		// describes the last loaded stream; expose the pointer's target too,
+		// with full metadata when the cache knows the track.
 		if p.settlePending && p.state.player.Track != nil {
 			resp.PendingTrackUri = &p.state.player.Track.Uri
+			if media := p.metaCache.get(p.state.player.Track.Uri); media != nil && p.prodInfo != nil {
+				resp.PendingTrack = p.newApiResponseStatusTrack(media, 0)
+			}
+		}
+
+		// Describe the upcoming track when its metadata is cached, so clients
+		// can pre-warm name and cover art before the user skips to it.
+		if p.state.tracks != nil && p.prodInfo != nil {
+			if next := p.state.tracks.PeekNext(ctx); next != nil {
+				if media := p.metaCache.get(next.Uri); media != nil {
+					resp.NextTrack = p.newApiResponseStatusTrack(media, 0)
+				}
+			}
 		}
 
 		return resp, nil
