@@ -30,6 +30,12 @@ type Config struct {
 	ExternalVolume            bool
 	DisableAutoplay           bool
 
+	// SkipDebounce is how long to wait after a burst of next/prev commands
+	// before actually loading the track the pointer landed on, so mashing the
+	// skip button costs one audio-key request instead of one per press. Zero
+	// disables debouncing (every skip loads immediately).
+	SkipDebounce time.Duration
+
 	ZeroconfEnabled               bool
 	ZeroconfPort                  int
 	ZeroconfBackend               string

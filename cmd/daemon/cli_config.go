@@ -54,6 +54,7 @@ type cliConfig struct {
 	NormalisationUseAlbumGain     bool     `koanf:"normalisation_use_album_gain"`
 	NormalisationPregain          float32  `koanf:"normalisation_pregain"`
 	CrossfadeDuration             int      `koanf:"crossfade_duration"`
+	SkipDebounceMs                int      `koanf:"skip_debounce_ms"`
 	ExternalVolume                bool     `koanf:"external_volume"`
 	ZeroconfEnabled               bool     `koanf:"zeroconf_enabled"`
 	ZeroconfPort                  int      `koanf:"zeroconf_port"`
@@ -125,6 +126,7 @@ func (c *cliConfig) toDaemonConfig() *daemon.Config {
 		NormalisationUseAlbumGain: c.NormalisationUseAlbumGain,
 		NormalisationPregain:      c.NormalisationPregain,
 		CrossfadeDuration:         c.CrossfadeDuration,
+		SkipDebounce:              time.Duration(c.SkipDebounceMs) * time.Millisecond,
 		ExternalVolume:            c.ExternalVolume,
 		DisableAutoplay:           c.DisableAutoplay,
 
@@ -207,6 +209,8 @@ func loadCLIConfig(cfg *cliConfig) error {
 
 		"volume_steps":   100,
 		"initial_volume": 100,
+
+		"skip_debounce_ms": 400,
 
 		"credentials.type": "zeroconf",
 
