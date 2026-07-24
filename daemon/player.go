@@ -670,6 +670,49 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 
 		snapshotId := hex.EncodeToString(content.Revision)
 		return &ApiResponseCacheSnapshot{SnapshotId: &snapshotId, Length: content.Length}, nil
+	case ApiRequestTypePlaylistTracks:
+		data := req.Data.(ApiRequestDataPlaylistTracks)
+		spotId, err := librespot.SpotifyIdFromUri(data.Uri)
+		if err != nil || spotId.Type() != librespot.SpotifyIdTypePlaylist {
+			return nil, ErrBadRequest
+		}
+
+		// One internal call yields the ordered track URIs; metadata comes from
+		// the daemon's cache, filled by the background sweep. Entries the cache
+		// does not know yet are returned with a null track — the request kicks
+		// a sweep for them, so a re-poll shortly after completes the listing.
+		content, err := p.sess.Spclient().GetPlaylist(ctx, *spotId)
+		if err != nil {
+			return nil, fmt.Errorf("failed fetching playlist: %w", err)
+		}
+
+		resp := &ApiResponsePlaylistTracks{
+			Uri:        data.Uri,
+			SnapshotId: hex.EncodeToString(content.Revision),
+			Tracks:     []ApiResponsePlaylistTrackItem{},
+		}
+
+		var uris []string
+		if content.Contents != nil {
+			for _, item := range content.Contents.Items {
+				uri := item.GetUri()
+				if !strings.HasPrefix(uri, "spotify:track:") {
+					continue
+				}
+				uris = append(uris, uri)
+
+				entry := ApiResponsePlaylistTrackItem{Uri: uri}
+				if media := p.metaCache.get(uri); media != nil && p.prodInfo != nil {
+					entry.Track = p.newApiResponseStatusTrack(media, 0)
+					resp.Cached++
+				}
+				resp.Tracks = append(resp.Tracks, entry)
+			}
+		}
+		resp.Length = len(resp.Tracks)
+
+		p.scheduleMetaSweep(uris, data.Uri)
+		return resp, nil
 	case ApiRequestTypeGetVolume:
 		return &ApiResponseVolume{
 			Max:   p.app.cfg.VolumeSteps,
