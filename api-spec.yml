@@ -225,6 +225,59 @@ paths:
                     type: integer
                     nullable: true
                     description: Number of tracks in the playlist
+  /playlist/tracks:
+    get:
+      description: >-
+        List a playlist's tracks in order with metadata (name, artists, cover
+        art) from the daemon's metadata cache, fetched via the internal API
+        (not the rate-limited public Web API). Entries the cache does not know
+        yet have a null track; the request kicks off a background sweep for
+        them, so re-polling shortly after completes the listing (cached ==
+        length). Clients can render a browsable song list from this and start
+        any entry via POST /player/play with the playlist uri and the track as
+        skip_to_uri.
+      parameters:
+        - name: uri
+          in: query
+          required: true
+          description: Spotify playlist URI
+          schema:
+            type: string
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uri:
+                    type: string
+                    description: The playlist URI
+                  snapshot_id:
+                    type: string
+                    description: Hex-encoded playlist revision; unchanged means the listing can be reused
+                  length:
+                    type: integer
+                    description: Number of track entries
+                  cached:
+                    type: integer
+                    description: Entries with full metadata; poll again while cached < length
+                  tracks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        uri:
+                          type: string
+                          description: Track URI
+                        track:
+                          allOf:
+                            - $ref: '#/components/schemas/track'
+                          nullable: true
+                          description: Full metadata, or null while not yet cached
+        400:
+          description: The URI is not a playlist
   /player/resume:
     post:
       description: Resume playback (from paused state)

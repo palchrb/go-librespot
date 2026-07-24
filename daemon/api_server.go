@@ -78,6 +78,7 @@ const (
 	ApiRequestTypeCacheDownload       ApiRequestType = "cache_download"
 	ApiRequestTypeCacheSnapshot       ApiRequestType = "cache_snapshot"
 	ApiRequestTypeReopenOutput        ApiRequestType = "reopen_output"
+	ApiRequestTypePlaylistTracks      ApiRequestType = "playlist_tracks"
 )
 
 type ApiEventType string
@@ -169,6 +170,31 @@ type ApiResponseCacheSnapshot struct {
 	SnapshotId *string `json:"snapshot_id"`
 	// Length is the number of tracks in the playlist, when available.
 	Length *int32 `json:"length"`
+}
+
+type ApiRequestDataPlaylistTracks struct {
+	Uri string `json:"uri"`
+}
+
+// ApiResponsePlaylistTrackItem is one entry of a playlist listing. Track is
+// null until the daemon's metadata cache knows the track; a background sweep
+// is kicked off by the request, so re-polling fills the gaps.
+type ApiResponsePlaylistTrackItem struct {
+	Uri   string                  `json:"uri"`
+	Track *ApiResponseStatusTrack `json:"track"`
+}
+
+type ApiResponsePlaylistTracks struct {
+	Uri string `json:"uri"`
+	// SnapshotId is the hex-encoded playlist revision; clients can cache the
+	// listing and skip re-fetching while it is unchanged.
+	SnapshotId string `json:"snapshot_id"`
+	// Length is the number of track entries in the listing.
+	Length int `json:"length"`
+	// Cached is how many entries carry full metadata; when Cached < Length a
+	// background sweep is filling the rest — poll again shortly.
+	Cached int                            `json:"cached"`
+	Tracks []ApiResponsePlaylistTrackItem `json:"tracks"`
 }
 
 type apiResponse struct {
@@ -545,6 +571,20 @@ func (s *ConcreteApiServer) serve() {
 		}
 
 		s.handleRequest(ApiRequest{Type: ApiRequestTypeCacheSnapshot, Data: ApiRequestDataCacheSnapshot{Uri: uri}}, w)
+	})
+	m.HandleFunc("/playlist/tracks", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		uri := r.URL.Query().Get("uri")
+		if len(uri) == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		s.handleRequest(ApiRequest{Type: ApiRequestTypePlaylistTracks, Data: ApiRequestDataPlaylistTracks{Uri: uri}}, w)
 	})
 	m.HandleFunc("/player/resume", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {

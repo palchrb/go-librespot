@@ -245,7 +245,43 @@ func (p *AppPlayer) fetchPlaylistMetadata(contextUri string) {
 		uris = uris[:fullMetaFetchLimit]
 	}
 
+	p.sweepBatches(ctx, p.metaCache.missing(uris), contextUri)
+}
+
+// scheduleMetaSweep resolves metadata for the given track URIs in the
+// background (paced batches), for callers that already know the track list —
+// e.g. the /playlist/tracks endpoint. Single-flighted together with the
+// context sweep; when a sweep is already running the call is dropped and the
+// client's next poll picks up whatever has been cached meanwhile.
+func (p *AppPlayer) scheduleMetaSweep(uris []string, label string) {
+	if p.metaCache == nil || p.sess == nil {
+		return
+	}
+
 	missing := p.metaCache.missing(uris)
+	if len(missing) == 0 {
+		return
+	}
+	if len(missing) > fullMetaFetchLimit {
+		missing = missing[:fullMetaFetchLimit]
+	}
+
+	if !p.fullMetaFetchInFlight.CompareAndSwap(false, true) {
+		return
+	}
+
+	go func() {
+		defer p.fullMetaFetchInFlight.Store(false)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		p.sweepBatches(ctx, missing, label)
+	}()
+}
+
+// sweepBatches fetches metadata for the given URIs in paced batches.
+func (p *AppPlayer) sweepBatches(ctx context.Context, missing []string, label string) {
 	total := len(missing)
 	var cached int
 	for len(missing) > 0 && ctx.Err() == nil {
@@ -257,7 +293,7 @@ func (p *AppPlayer) fetchPlaylistMetadata(contextUri string) {
 
 		n, err := p.fetchTrackMetadataBatch(ctx, batch)
 		if err != nil {
-			p.app.log.WithError(err).Warnf("metadata sweep aborted for %s", contextUri)
+			p.app.log.WithError(err).Warnf("metadata sweep aborted for %s", label)
 			return
 		}
 		cached += n
@@ -268,6 +304,6 @@ func (p *AppPlayer) fetchPlaylistMetadata(contextUri string) {
 	}
 
 	if total > 0 {
-		p.app.log.Infof("swept metadata for %d/%d tracks in %s", cached, total, contextUri)
+		p.app.log.Infof("swept metadata for %d/%d tracks in %s", cached, total, label)
 	}
 }
