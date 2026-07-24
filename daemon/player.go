@@ -27,6 +27,8 @@ import (
 	"github.com/devgianlu/go-librespot/dealer"
 	"github.com/devgianlu/go-librespot/player"
 	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
+	extmetadatapb "github.com/devgianlu/go-librespot/proto/spotify/extendedmetadata"
+	metadatapb "github.com/devgianlu/go-librespot/proto/spotify/metadata"
 	"github.com/devgianlu/go-librespot/session"
 	"github.com/devgianlu/go-librespot/spclient"
 	"github.com/devgianlu/go-librespot/tracks"
@@ -670,49 +672,119 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 
 		snapshotId := hex.EncodeToString(content.Revision)
 		return &ApiResponseCacheSnapshot{SnapshotId: &snapshotId, Length: content.Length}, nil
-	case ApiRequestTypePlaylistTracks:
-		data := req.Data.(ApiRequestDataPlaylistTracks)
+	case ApiRequestTypeContextTracks:
+		data := req.Data.(ApiRequestDataContextTracks)
 		spotId, err := librespot.SpotifyIdFromUri(data.Uri)
-		if err != nil || spotId.Type() != librespot.SpotifyIdTypePlaylist {
+		if err != nil {
 			return nil, ErrBadRequest
 		}
 
-		// One internal call yields the ordered track URIs; metadata comes from
-		// the daemon's cache, filled by the background sweep. Entries the cache
-		// does not know yet are returned with a null track — the request kicks
-		// a sweep for them, so a re-poll shortly after completes the listing.
-		content, err := p.sess.Spclient().GetPlaylist(ctx, *spotId)
-		if err != nil {
-			return nil, fmt.Errorf("failed fetching playlist: %w", err)
-		}
-
-		resp := &ApiResponsePlaylistTracks{
-			Uri:        data.Uri,
-			SnapshotId: hex.EncodeToString(content.Revision),
-			Tracks:     []ApiResponsePlaylistTrackItem{},
-		}
-
-		var uris []string
-		if content.Contents != nil {
-			for _, item := range content.Contents.Items {
-				uri := item.GetUri()
-				if !strings.HasPrefix(uri, "spotify:track:") {
-					continue
-				}
-				uris = append(uris, uri)
-
-				entry := ApiResponsePlaylistTrackItem{Uri: uri}
-				if media := p.metaCache.get(uri); media != nil && p.prodInfo != nil {
-					entry.Track = p.newApiResponseStatusTrack(media, 0)
-					resp.Cached++
-				}
-				resp.Tracks = append(resp.Tracks, entry)
+		switch spotId.Type() {
+		case librespot.SpotifyIdTypePlaylist:
+			// One internal call yields the ordered track URIs; metadata comes
+			// from the daemon's cache, filled by the background sweep. Entries
+			// the cache does not know yet are returned with a null track — the
+			// request kicks a sweep for them, so a re-poll shortly after
+			// completes the listing.
+			content, err := p.sess.Spclient().GetPlaylist(ctx, *spotId)
+			if err != nil {
+				return nil, fmt.Errorf("failed fetching playlist: %w", err)
 			}
-		}
-		resp.Length = len(resp.Tracks)
 
-		p.scheduleMetaSweep(uris, data.Uri)
-		return resp, nil
+			resp := &ApiResponseContextTracks{
+				Uri:        data.Uri,
+				SnapshotId: pointer(hex.EncodeToString(content.Revision)),
+				Tracks:     []ApiResponseContextTrackItem{},
+			}
+
+			var uris []string
+			if content.Contents != nil {
+				for _, item := range content.Contents.Items {
+					uri := item.GetUri()
+					if !strings.HasPrefix(uri, "spotify:track:") {
+						continue
+					}
+					uris = append(uris, uri)
+
+					entry := ApiResponseContextTrackItem{Uri: uri}
+					if media := p.metaCache.get(uri); media != nil && p.prodInfo != nil {
+						entry.Track = p.newApiResponseStatusTrack(media, 0)
+						resp.Cached++
+					}
+					resp.Tracks = append(resp.Tracks, entry)
+				}
+			}
+			resp.Length = len(resp.Tracks)
+
+			p.scheduleMetaSweep(uris, data.Uri)
+			return resp, nil
+		case librespot.SpotifyIdTypeAlbum:
+			// A single ALBUM_V4 request carries the whole disc/track listing,
+			// so album listings are complete on the first call; no sweep
+			// needed. The embedded track protos lack the album back-reference,
+			// so enrich them before wrapping — that also makes them useful to
+			// the metadata cache (pending_track while skipping in the album).
+			var albumMeta metadatapb.Album
+			if err := p.sess.Spclient().ExtendedMetadataSimple(ctx, *spotId, extmetadatapb.ExtensionKind_ALBUM_V4, &albumMeta); err != nil {
+				return nil, fmt.Errorf("failed fetching album metadata: %w", err)
+			}
+
+			resp := &ApiResponseContextTracks{
+				Uri:    data.Uri,
+				Tracks: []ApiResponseContextTrackItem{},
+			}
+
+			for _, disc := range albumMeta.Disc {
+				for _, t := range disc.Track {
+					if len(t.Gid) == 0 {
+						continue
+					}
+					uri := librespot.SpotifyIdFromGid(librespot.SpotifyIdTypeTrack, t.Gid).Uri()
+					entry := ApiResponseContextTrackItem{Uri: uri}
+
+					if t.Album == nil {
+						t.Album = &metadatapb.Album{
+							Gid:        albumMeta.Gid,
+							Name:       albumMeta.Name,
+							Artist:     albumMeta.Artist,
+							Date:       albumMeta.Date,
+							Cover:      albumMeta.Cover,
+							CoverGroup: albumMeta.CoverGroup,
+						}
+					}
+					if t.DiscNumber == nil {
+						t.DiscNumber = pointer(disc.GetNumber())
+					}
+					if len(t.Artist) == 0 {
+						t.Artist = albumMeta.Artist
+					}
+
+					// newApiResponseStatusTrack dereferences these; skip the
+					// metadata (uri-only entry) if the proto is incomplete.
+					complete := t.Name != nil && t.Duration != nil && t.Number != nil &&
+						t.Album.Name != nil
+					for _, a := range t.Artist {
+						complete = complete && a.Name != nil
+					}
+					if !complete {
+						resp.Tracks = append(resp.Tracks, entry)
+						continue
+					}
+
+					media := librespot.NewMediaFromTrack(t)
+					p.metaCache.put(uri, media)
+					if p.prodInfo != nil {
+						entry.Track = p.newApiResponseStatusTrack(media, 0)
+						resp.Cached++
+					}
+					resp.Tracks = append(resp.Tracks, entry)
+				}
+			}
+			resp.Length = len(resp.Tracks)
+			return resp, nil
+		default:
+			return nil, ErrBadRequest
+		}
 	case ApiRequestTypeGetVolume:
 		return &ApiResponseVolume{
 			Max:   p.app.cfg.VolumeSteps,

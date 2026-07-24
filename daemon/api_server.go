@@ -78,7 +78,7 @@ const (
 	ApiRequestTypeCacheDownload       ApiRequestType = "cache_download"
 	ApiRequestTypeCacheSnapshot       ApiRequestType = "cache_snapshot"
 	ApiRequestTypeReopenOutput        ApiRequestType = "reopen_output"
-	ApiRequestTypePlaylistTracks      ApiRequestType = "playlist_tracks"
+	ApiRequestTypeContextTracks       ApiRequestType = "context_tracks"
 )
 
 type ApiEventType string
@@ -172,29 +172,31 @@ type ApiResponseCacheSnapshot struct {
 	Length *int32 `json:"length"`
 }
 
-type ApiRequestDataPlaylistTracks struct {
+type ApiRequestDataContextTracks struct {
 	Uri string `json:"uri"`
 }
 
-// ApiResponsePlaylistTrackItem is one entry of a playlist listing. Track is
-// null until the daemon's metadata cache knows the track; a background sweep
-// is kicked off by the request, so re-polling fills the gaps.
-type ApiResponsePlaylistTrackItem struct {
+// ApiResponseContextTrackItem is one entry of a context listing. For
+// playlists, Track is null until the daemon's metadata cache knows the track;
+// a background sweep is kicked off by the request, so re-polling fills the
+// gaps. Album listings are always complete on the first call.
+type ApiResponseContextTrackItem struct {
 	Uri   string                  `json:"uri"`
 	Track *ApiResponseStatusTrack `json:"track"`
 }
 
-type ApiResponsePlaylistTracks struct {
+type ApiResponseContextTracks struct {
 	Uri string `json:"uri"`
 	// SnapshotId is the hex-encoded playlist revision; clients can cache the
-	// listing and skip re-fetching while it is unchanged.
-	SnapshotId string `json:"snapshot_id"`
+	// listing and skip re-fetching while it is unchanged. Null for albums,
+	// which are immutable.
+	SnapshotId *string `json:"snapshot_id"`
 	// Length is the number of track entries in the listing.
 	Length int `json:"length"`
 	// Cached is how many entries carry full metadata; when Cached < Length a
 	// background sweep is filling the rest — poll again shortly.
-	Cached int                            `json:"cached"`
-	Tracks []ApiResponsePlaylistTrackItem `json:"tracks"`
+	Cached int                           `json:"cached"`
+	Tracks []ApiResponseContextTrackItem `json:"tracks"`
 }
 
 type apiResponse struct {
@@ -572,7 +574,7 @@ func (s *ConcreteApiServer) serve() {
 
 		s.handleRequest(ApiRequest{Type: ApiRequestTypeCacheSnapshot, Data: ApiRequestDataCacheSnapshot{Uri: uri}}, w)
 	})
-	m.HandleFunc("/playlist/tracks", func(w http.ResponseWriter, r *http.Request) {
+	contextTracksHandler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -584,8 +586,11 @@ func (s *ConcreteApiServer) serve() {
 			return
 		}
 
-		s.handleRequest(ApiRequest{Type: ApiRequestTypePlaylistTracks, Data: ApiRequestDataPlaylistTracks{Uri: uri}}, w)
-	})
+		s.handleRequest(ApiRequest{Type: ApiRequestTypeContextTracks, Data: ApiRequestDataContextTracks{Uri: uri}}, w)
+	}
+	m.HandleFunc("/context/tracks", contextTracksHandler)
+	// Deprecated alias from when the listing was playlist-only.
+	m.HandleFunc("/playlist/tracks", contextTracksHandler)
 	m.HandleFunc("/player/resume", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			w.WriteHeader(http.StatusMethodNotAllowed)
