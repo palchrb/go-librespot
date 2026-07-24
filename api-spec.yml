@@ -225,22 +225,23 @@ paths:
                     type: integer
                     nullable: true
                     description: Number of tracks in the playlist
-  /playlist/tracks:
+  /context/tracks:
     get:
       description: >-
-        List a playlist's tracks in order with metadata (name, artists, cover
-        art) from the daemon's metadata cache, fetched via the internal API
-        (not the rate-limited public Web API). Entries the cache does not know
-        yet have a null track; the request kicks off a background sweep for
-        them, so re-polling shortly after completes the listing (cached ==
-        length). Clients can render a browsable song list from this and start
-        any entry via POST /player/play with the playlist uri and the track as
-        skip_to_uri.
+        List a playlist's or album's tracks in order with metadata (name,
+        artists, cover art), fetched via the internal API (not the
+        rate-limited public Web API). For playlists the metadata comes from
+        the daemon's cache; entries the cache does not know yet have a null
+        track, and the request kicks off a background sweep for them, so
+        re-polling shortly after completes the listing (cached == length).
+        Album listings are always complete on the first call. Clients can
+        render a browsable song list from this and start any entry via POST
+        /player/play with the context uri and the track as skip_to_uri.
       parameters:
         - name: uri
           in: query
           required: true
-          description: Spotify playlist URI
+          description: Spotify playlist or album URI
           schema:
             type: string
       responses:
@@ -253,10 +254,13 @@ paths:
                 properties:
                   uri:
                     type: string
-                    description: The playlist URI
+                    description: The context URI
                   snapshot_id:
                     type: string
-                    description: Hex-encoded playlist revision; unchanged means the listing can be reused
+                    nullable: true
+                    description: >-
+                      Hex-encoded playlist revision; unchanged means the
+                      listing can be reused. Null for albums (immutable).
                   length:
                     type: integer
                     description: Number of track entries
@@ -277,7 +281,7 @@ paths:
                           nullable: true
                           description: Full metadata, or null while not yet cached
         400:
-          description: The URI is not a playlist
+          description: The URI is not a playlist or album
   /player/resume:
     post:
       description: Resume playback (from paused state)
