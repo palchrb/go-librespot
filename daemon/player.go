@@ -719,11 +719,14 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 			p.scheduleMetaSweep(uris, data.Uri)
 			return resp, nil
 		case librespot.SpotifyIdTypeAlbum:
-			// A single ALBUM_V4 request carries the whole disc/track listing,
-			// so album listings are complete on the first call; no sweep
-			// needed. The embedded track protos lack the album back-reference,
-			// so enrich them before wrapping — that also makes them useful to
-			// the metadata cache (pending_track while skipping in the album).
+			// A single ALBUM_V4 request yields the ordered disc/track listing.
+			// The embedded track protos are usually skeletal (little more than
+			// the gid), so metadata comes from the daemon's cache like for
+			// playlists: entries the cache does not know yet are returned with
+			// a null track, and the request kicks a TRACK_V4 sweep for them —
+			// a re-poll shortly after completes the listing. When the embedded
+			// proto does happen to be complete, it is used (and cached)
+			// directly after enriching it with the album back-reference.
 			var albumMeta metadatapb.Album
 			if err := p.sess.Spclient().ExtendedMetadataSimple(ctx, *spotId, extmetadatapb.ExtensionKind_ALBUM_V4, &albumMeta); err != nil {
 				return nil, fmt.Errorf("failed fetching album metadata: %w", err)
@@ -734,12 +737,14 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 				Tracks: []ApiResponseContextTrackItem{},
 			}
 
+			var uris []string
 			for _, disc := range albumMeta.Disc {
 				for _, t := range disc.Track {
 					if len(t.Gid) == 0 {
 						continue
 					}
 					uri := librespot.SpotifyIdFromGid(librespot.SpotifyIdTypeTrack, t.Gid).Uri()
+					uris = append(uris, uri)
 					entry := ApiResponseContextTrackItem{Uri: uri}
 
 					if t.Album == nil {
@@ -759,28 +764,32 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 						t.Artist = albumMeta.Artist
 					}
 
-					// newApiResponseStatusTrack dereferences these; skip the
-					// metadata (uri-only entry) if the proto is incomplete.
+					// newApiResponseStatusTrack dereferences these; fall back
+					// to the cache if the embedded proto is incomplete.
 					complete := t.Name != nil && t.Duration != nil && t.Number != nil &&
 						t.Album.Name != nil
 					for _, a := range t.Artist {
 						complete = complete && a.Name != nil
 					}
-					if !complete {
-						resp.Tracks = append(resp.Tracks, entry)
-						continue
-					}
 
-					media := librespot.NewMediaFromTrack(t)
-					p.metaCache.put(uri, media)
-					if p.prodInfo != nil {
+					if complete {
+						media := librespot.NewMediaFromTrack(t)
+						p.metaCache.put(uri, media)
+						if p.prodInfo != nil {
+							entry.Track = p.newApiResponseStatusTrack(media, 0)
+						}
+					} else if media := p.metaCache.get(uri); media != nil && p.prodInfo != nil {
 						entry.Track = p.newApiResponseStatusTrack(media, 0)
+					}
+					if entry.Track != nil {
 						resp.Cached++
 					}
 					resp.Tracks = append(resp.Tracks, entry)
 				}
 			}
 			resp.Length = len(resp.Tracks)
+
+			p.scheduleMetaSweep(uris, data.Uri)
 			return resp, nil
 		default:
 			return nil, ErrBadRequest

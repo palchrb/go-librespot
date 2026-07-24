@@ -176,10 +176,9 @@ type ApiRequestDataContextTracks struct {
 	Uri string `json:"uri"`
 }
 
-// ApiResponseContextTrackItem is one entry of a context listing. For
-// playlists, Track is null until the daemon's metadata cache knows the track;
-// a background sweep is kicked off by the request, so re-polling fills the
-// gaps. Album listings are always complete on the first call.
+// ApiResponseContextTrackItem is one entry of a context listing. Track is
+// null until the daemon's metadata cache knows the track; a background sweep
+// is kicked off by the request, so re-polling fills the gaps.
 type ApiResponseContextTrackItem struct {
 	Uri   string                  `json:"uri"`
 	Track *ApiResponseStatusTrack `json:"track"`

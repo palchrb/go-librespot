@@ -230,12 +230,11 @@ paths:
       description: >-
         List a playlist's or album's tracks in order with metadata (name,
         artists, cover art), fetched via the internal API (not the
-        rate-limited public Web API). For playlists the metadata comes from
-        the daemon's cache; entries the cache does not know yet have a null
-        track, and the request kicks off a background sweep for them, so
-        re-polling shortly after completes the listing (cached == length).
-        Album listings are always complete on the first call. Clients can
-        render a browsable song list from this and start any entry via POST
+        rate-limited public Web API). Metadata comes from the daemon's cache;
+        entries the cache does not know yet have a null track, and the
+        request kicks off a background sweep for them, so re-polling shortly
+        after completes the listing (cached == length). Clients can render a
+        browsable song list from this and start any entry via POST
         /player/play with the context uri and the track as skip_to_uri.
       parameters:
         - name: uri
