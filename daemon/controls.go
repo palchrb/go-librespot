@@ -327,8 +327,10 @@ func (p *AppPlayer) loadContext(ctx context.Context, spotCtx *connectpb.Context,
 	p.state.player.Index = ctxTracks.Index()
 
 	// Fetch metadata for the context window in the background while the first
-	// track loads, so names and cover art are known before the user skips.
+	// track loads, so names and cover art are known before the user skips —
+	// and, for playlists, sweep the whole list so every track is known.
 	p.scheduleMetaPrefetch()
+	p.scheduleContextMetaPrefetch(spotCtx.Uri)
 
 	// load current track into stream — skip forward if it (or a run of tracks) is unplayable.
 	if err := p.loadCurrentTrackOrSkip(ctx, paused, drop); err != nil {

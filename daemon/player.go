@@ -91,8 +91,13 @@ type AppPlayer struct {
 	// metaCache holds metadata for tracks around the playback position so /status can
 	// describe tracks whose stream is not loaded yet (pending skips, the upcoming track).
 	metaCache *trackMetaCache
-	// metaFetchInFlight single-flights the background metadata batch fetch.
+	// metaFetchInFlight single-flights the background window metadata fetch.
 	metaFetchInFlight atomic.Bool
+	// fullMetaFetchInFlight single-flights the background full-context sweep.
+	fullMetaFetchInFlight atomic.Bool
+	// lastFullMetaContext is the context uri the last full sweep ran for, so
+	// replaying the same playlist does not re-sweep it. Run goroutine only.
+	lastFullMetaContext string
 }
 
 func (p *AppPlayer) playbackReady() bool {
@@ -313,8 +318,10 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 		p.state.player.Index = ctxTracks.Index()
 
 		// Fetch metadata for the transferred window in the background while the
-		// track loads, so names and cover art are known before the user skips.
+		// track loads, so names and cover art are known before the user skips —
+		// and, for playlists, sweep the whole list so every track is known.
 		p.scheduleMetaPrefetch()
+		p.scheduleContextMetaPrefetch(p.state.player.ContextUri)
 
 		// load current track into stream — skip forward if the transferred track is unplayable
 		// (Spotify refused its key / restricted), so a cast onto a refused track doesn't freeze.
