@@ -133,6 +133,24 @@ paths:
                       when no skip is pending.
                     type: string
                     nullable: true
+                  pending_track:
+                    description: >-
+                      Full metadata (name, artists, cover art) for the pending
+                      track when the daemon's metadata cache knows it, so
+                      clients can display it while the load is still deferred.
+                      Absent when no skip is pending or the metadata is not
+                      cached yet.
+                    allOf:
+                      - $ref: '#/components/schemas/track'
+                    nullable: true
+                  next_track:
+                    description: >-
+                      The upcoming track when its metadata is cached, so
+                      clients can pre-warm name and cover art before the user
+                      skips to it. Absent when unknown.
+                    allOf:
+                      - $ref: '#/components/schemas/track'
+                    nullable: true
   /set_device_name:
     post:
       description: Set the player device name

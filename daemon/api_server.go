@@ -296,6 +296,13 @@ type ApiResponseStatus struct {
 	// is deferred while the user is still browsing); null otherwise. The track
 	// object still describes the last loaded stream.
 	PendingTrackUri *string `json:"pending_track_uri,omitempty"`
+	// PendingTrack carries full metadata (name, artists, cover art) for the
+	// pending track when it is known from the daemon's metadata cache, so
+	// clients can display it while the load is still deferred.
+	PendingTrack *ApiResponseStatusTrack `json:"pending_track,omitempty"`
+	// NextTrack describes the upcoming track when its metadata is cached, so
+	// clients can pre-warm name and cover art before the user skips to it.
+	NextTrack *ApiResponseStatusTrack `json:"next_track,omitempty"`
 }
 
 type ApiResponseRoot struct {
