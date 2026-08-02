@@ -708,9 +708,12 @@ func (p *AppPlayer) shouldDeferSkip() bool {
 	return defer_
 }
 
-// deferSettle publishes the pending pointer position (will_play event + coalesced state
-// PUT) and (re)arms the settle timer. Runs after every deferred pointer move.
+// deferSettle publishes the pending pointer position (will_play event, plus a connect-state
+// PUT on the first deferral) and (re)arms the settle timer. Runs after every deferred
+// pointer move.
 func (p *AppPlayer) deferSettle(ctx context.Context) {
+	first := !p.settlePending
+
 	p.settlePending = true
 	p.settleTimer.Reset(p.app.cfg.SkipDebounce)
 	p.lastSkipDone = time.Now()
@@ -723,7 +726,16 @@ func (p *AppPlayer) deferSettle(ctx context.Context) {
 	p.state.player.IsPlaying = true
 	p.state.player.IsBuffering = true
 	p.state.player.PlaybackSpeed = 0
-	p.updateState(ctx)
+
+	// Only the first deferral of a burst PUTs the connect state. Every later pointer
+	// move is superseded within skip_debounce_ms, so PUTting each one buys nothing but
+	// rate-limit pressure: a long burst moves the pointer faster than the 200ms
+	// coalescing interval and the endpoint starts answering 429. Local subscribers
+	// still see every move through the will_play event below, and the settled load
+	// publishes the state that actually matters.
+	if first {
+		p.updateState(ctx)
+	}
 
 	p.app.server.Emit(&ApiEvent{
 		Type: ApiEventTypeWillPlay,
