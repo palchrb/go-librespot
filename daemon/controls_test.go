@@ -124,6 +124,35 @@ func TestDeferSettlePublishesPendingTrack(t *testing.T) {
 	}
 }
 
+// A burst moves the pointer far faster than the connect-state endpoint tolerates,
+// so only the first deferral publishes; the rest are visible locally through
+// will_play and are superseded before anyone could have seen them remotely.
+func TestDeferSettlePutsConnectStateOncePerBurst(t *testing.T) {
+	p, server := newSettleTestPlayer(t, 400*time.Millisecond)
+
+	p.deferSettle(context.Background())
+	if !p.statePutScheduled {
+		t.Fatal("expected the first deferral of a burst to publish the connect state")
+	}
+
+	// Pretend the scheduled PUT went out, then keep skipping within the window.
+	p.statePutScheduled = false
+	p.stateDirty = false
+
+	for i := 0; i < 5; i++ {
+		p.deferSettle(context.Background())
+	}
+
+	if p.statePutScheduled || p.stateDirty {
+		t.Fatalf("expected no further connect-state PUTs during the burst, got scheduled=%t dirty=%t",
+			p.statePutScheduled, p.stateDirty)
+	}
+
+	if events := server.snapshot(); len(events) != 6 {
+		t.Fatalf("expected a will_play event for every pointer move, got %v", events)
+	}
+}
+
 func TestSettleNowWithoutContextIsNoop(t *testing.T) {
 	p, server := newSettleTestPlayer(t, 400*time.Millisecond)
 	p.settlePending = true
