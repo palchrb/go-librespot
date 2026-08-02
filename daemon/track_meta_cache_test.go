@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
 	metadatapb "github.com/devgianlu/go-librespot/proto/spotify/metadata"
@@ -64,5 +65,55 @@ func TestTrackMetaCacheEviction(t *testing.T) {
 	c.put(fmt.Sprintf("spotify:track:%d", trackMetaCacheLimit), mediaFixture("y"))
 	if len(c.order) != trackMetaCacheLimit {
 		t.Fatalf("expected re-put not to grow the cache, got %d", len(c.order))
+	}
+}
+
+// A client polling a filling sweep asks for the same context every second or
+// two; enumerating pages over the network, so those polls must be served from
+// memory rather than re-paging the whole playlist each time.
+func TestContextListCacheServesRepeatLookups(t *testing.T) {
+	c := newContextListCache()
+	now := time.Now()
+
+	if _, ok := c.get("spotify:playlist:a"); ok {
+		t.Fatal("expected miss on empty cache")
+	}
+
+	c.put("spotify:playlist:a", []string{"spotify:track:1", "spotify:track:2"}, now)
+
+	uris, ok := c.get("spotify:playlist:a")
+	if !ok || len(uris) != 2 {
+		t.Fatalf("expected the enumerated listing back, got %v (ok=%t)", uris, ok)
+	}
+}
+
+// The listing carries no revision, so a stale entry is the only way a client
+// could miss an edit; the TTL bounds how long that can last.
+func TestContextListCacheExpires(t *testing.T) {
+	c := newContextListCache()
+
+	c.put("spotify:playlist:a", []string{"spotify:track:1"}, time.Now().Add(-contextListTTL-time.Second))
+
+	if _, ok := c.get("spotify:playlist:a"); ok {
+		t.Fatal("expected an entry older than the TTL to be treated as a miss")
+	}
+}
+
+func TestContextListCacheEviction(t *testing.T) {
+	c := newContextListCache()
+	now := time.Now()
+
+	for i := 0; i < contextListCacheLimit+3; i++ {
+		c.put(fmt.Sprintf("spotify:playlist:%d", i), []string{"spotify:track:1"}, now)
+	}
+
+	if len(c.entries) != contextListCacheLimit {
+		t.Fatalf("expected the cache bounded to %d entries, got %d", contextListCacheLimit, len(c.entries))
+	}
+	if _, ok := c.get("spotify:playlist:0"); ok {
+		t.Fatal("expected the oldest context evicted")
+	}
+	if _, ok := c.get(fmt.Sprintf("spotify:playlist:%d", contextListCacheLimit+2)); !ok {
+		t.Fatal("expected the newest context retained")
 	}
 }

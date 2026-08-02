@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -9,6 +10,7 @@ import (
 	librespot "github.com/devgianlu/go-librespot"
 	extmetadatapb "github.com/devgianlu/go-librespot/proto/spotify/extendedmetadata"
 	metadatapb "github.com/devgianlu/go-librespot/proto/spotify/metadata"
+	"github.com/devgianlu/go-librespot/tracks"
 )
 
 // trackMetaCacheLimit bounds the in-memory metadata cache. Entries are a few
@@ -181,26 +183,113 @@ func (p *AppPlayer) fetchTrackMetadataBatch(ctx context.Context, uris []string) 
 	return cached, nil
 }
 
-// fullMetaFetchLimit caps how many tracks of a context the full sweep
-// resolves, leaving cache headroom for the moving window of other contexts.
+// fullMetaFetchLimit caps how many tracks of a context are enumerated and
+// swept, leaving cache headroom for the moving window of other contexts.
 const fullMetaFetchLimit = 800
 
 // fullMetaBatchPause spaces the batches of a full-context sweep so it never
 // competes with the playback path for the radio or the account budget.
 const fullMetaBatchPause = time.Second
 
-// scheduleContextMetaPrefetch resolves metadata for the WHOLE playlist in the
-// background: one internal GetPlaylist call for the track URIs, then batched
-// extended-metadata requests, paced. After it completes every track in the
-// list is known to /status (pending_track/next_track) before the user skips
-// anywhere. Only playlists carry a cheap full track listing; other context
-// types rely on the window prefetch. Runs on the Run goroutine; the sweep is
-// single-flighted and skipped when this context was already swept.
-func (p *AppPlayer) scheduleContextMetaPrefetch(contextUri string) {
-	if p.metaCache == nil || p.sess == nil {
-		return
+// contextListTTL bounds how long an enumerated context listing is reused.
+// Re-polls while a sweep fills in metadata (seconds apart) must not re-page the
+// whole context, but a playlist edited between two sittings should be picked up.
+const contextListTTL = 5 * time.Minute
+
+// contextListCacheLimit bounds how many enumerated contexts are remembered.
+const contextListCacheLimit = 8
+
+type contextListEntry struct {
+	uris    []string
+	fetched time.Time
+}
+
+// contextListCache remembers the track URIs of recently enumerated contexts.
+// Enumeration pages over the network, and both the listing endpoint and the
+// sweep ask for the same context repeatedly, so without this a client polling
+// for a filling sweep would re-page the whole playlist on every poll.
+type contextListCache struct {
+	mu      sync.Mutex
+	entries map[string]contextListEntry
+	order   []string
+}
+
+func newContextListCache() *contextListCache {
+	return &contextListCache{entries: map[string]contextListEntry{}}
+}
+
+func (c *contextListCache) get(uri string) ([]string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	e, ok := c.entries[uri]
+	if !ok || time.Since(e.fetched) > contextListTTL {
+		return nil, false
 	}
-	if !strings.HasPrefix(contextUri, "spotify:playlist:") {
+	return e.uris, true
+}
+
+func (c *contextListCache) put(uri string, uris []string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, ok := c.entries[uri]; !ok {
+		c.order = append(c.order, uri)
+	}
+	c.entries[uri] = contextListEntry{uris: uris, fetched: now}
+
+	for len(c.order) > contextListCacheLimit {
+		delete(c.entries, c.order[0])
+		c.order = c.order[1:]
+	}
+}
+
+// resolveContextTracks enumerates every track of an arbitrary context URI —
+// playlist, album, artist, whatever the context resolver understands. It builds
+// a throwaway track list rather than reading the playing one: List is not safe
+// for concurrent use and the Run goroutine mutates it on every skip, and a fresh
+// list is in the context's own order rather than the shuffled playback order.
+//
+// Only track URIs are returned; episodes carry no TRACK_V4 metadata, so a show
+// context enumerates to nothing.
+func (p *AppPlayer) resolveContextTracks(ctx context.Context, uri string) ([]string, error) {
+	if uris, ok := p.contextLists.get(uri); ok {
+		return uris, nil
+	}
+
+	spotCtx, err := p.sess.Spclient().ContextResolve(ctx, uri)
+	if err != nil {
+		return nil, fmt.Errorf("failed resolving context: %w", err)
+	}
+
+	tl, err := tracks.NewTrackListFromContext(ctx, p.app.log, p.sess.Spclient(), spotCtx)
+	if err != nil {
+		return nil, fmt.Errorf("failed building track list: %w", err)
+	}
+
+	var uris []string
+	for _, t := range tl.AllTracks(ctx) {
+		if strings.HasPrefix(t.Uri, "spotify:track:") {
+			uris = append(uris, t.Uri)
+		}
+		if len(uris) == fullMetaFetchLimit {
+			p.app.log.Debugf("context listing truncated to %d tracks: %s", fullMetaFetchLimit, uri)
+			break
+		}
+	}
+
+	p.contextLists.put(uri, uris, time.Now())
+	return uris, nil
+}
+
+// scheduleContextMetaPrefetch resolves metadata for the WHOLE context in the
+// background: enumerate its tracks, then batched extended-metadata requests,
+// paced. After it completes every track in the context is known to /status
+// (pending_track/next_track) before the user skips anywhere. Runs on the Run
+// goroutine; the sweep is single-flighted and skipped when this context was
+// already swept.
+func (p *AppPlayer) scheduleContextMetaPrefetch(contextUri string) {
+	if p.metaCache == nil || p.sess == nil || contextUri == "" {
 		return
 	}
 	if contextUri == p.lastFullMetaContext {
@@ -211,38 +300,20 @@ func (p *AppPlayer) scheduleContextMetaPrefetch(contextUri string) {
 	}
 
 	p.lastFullMetaContext = contextUri
-	go p.fetchPlaylistMetadata(contextUri)
+	go p.fetchContextMetadata(contextUri)
 }
 
-// fetchPlaylistMetadata is the background half of scheduleContextMetaPrefetch.
-func (p *AppPlayer) fetchPlaylistMetadata(contextUri string) {
+// fetchContextMetadata is the background half of scheduleContextMetaPrefetch.
+func (p *AppPlayer) fetchContextMetadata(contextUri string) {
 	defer p.fullMetaFetchInFlight.Store(false)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	spotId, err := librespot.SpotifyIdFromUri(contextUri)
+	uris, err := p.resolveContextTracks(ctx, contextUri)
 	if err != nil {
+		p.app.log.WithError(err).Warnf("failed enumerating context for metadata sweep: %s", contextUri)
 		return
-	}
-
-	content, err := p.sess.Spclient().GetPlaylist(ctx, *spotId)
-	if err != nil {
-		p.app.log.WithError(err).Warnf("failed fetching playlist for metadata sweep: %s", contextUri)
-		return
-	}
-
-	var uris []string
-	if content.Contents != nil {
-		for _, item := range content.Contents.Items {
-			if uri := item.GetUri(); strings.HasPrefix(uri, "spotify:track:") {
-				uris = append(uris, uri)
-			}
-		}
-	}
-	if len(uris) > fullMetaFetchLimit {
-		p.app.log.Debugf("metadata sweep truncated to %d of %d tracks", fullMetaFetchLimit, len(uris))
-		uris = uris[:fullMetaFetchLimit]
 	}
 
 	p.sweepBatches(ctx, p.metaCache.missing(uris), contextUri)

@@ -56,7 +56,6 @@ const (
 	SpotifyIdTypeTrack    SpotifyIdType = "track"
 	SpotifyIdTypeEpisode  SpotifyIdType = "episode"
 	SpotifyIdTypePlaylist SpotifyIdType = "playlist"
-	SpotifyIdTypeAlbum    SpotifyIdType = "album"
 )
 
 type SpotifyId struct {

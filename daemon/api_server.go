@@ -186,10 +186,6 @@ type ApiResponseContextTrackItem struct {
 
 type ApiResponseContextTracks struct {
 	Uri string `json:"uri"`
-	// SnapshotId is the hex-encoded playlist revision; clients can cache the
-	// listing and skip re-fetching while it is unchanged. Null for albums,
-	// which are immutable.
-	SnapshotId *string `json:"snapshot_id"`
 	// Length is the number of track entries in the listing.
 	Length int `json:"length"`
 	// Cached is how many entries carry full metadata; when Cached < Length a

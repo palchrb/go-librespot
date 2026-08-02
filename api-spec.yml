@@ -228,19 +228,24 @@ paths:
   /context/tracks:
     get:
       description: >-
-        List a playlist's or album's tracks in order with metadata (name,
-        artists, cover art), fetched via the internal API (not the
-        rate-limited public Web API). Metadata comes from the daemon's cache;
-        entries the cache does not know yet have a null track, and the
+        List a context's tracks in order with metadata (name, artists, cover
+        art), fetched via the internal API (not the rate-limited public Web
+        API). Any context the player can play is accepted — playlist, album,
+        artist — and enumerated the same way. Metadata comes from the daemon's
+        cache; entries the cache does not know yet have a null track, and the
         request kicks off a background sweep for them, so re-polling shortly
         after completes the listing (cached == length). Clients can render a
         browsable song list from this and start any entry via POST
         /player/play with the context uri and the track as skip_to_uri.
+
+        Only tracks are listed; episodes are omitted, so a show enumerates to
+        an empty listing. Long contexts are truncated to 800 tracks. To decide
+        whether a cached listing is stale, use GET /cache/snapshot.
       parameters:
         - name: uri
           in: query
           required: true
-          description: Spotify playlist or album URI
+          description: Spotify context URI (playlist, album, artist)
           schema:
             type: string
       responses:
@@ -254,12 +259,6 @@ paths:
                   uri:
                     type: string
                     description: The context URI
-                  snapshot_id:
-                    type: string
-                    nullable: true
-                    description: >-
-                      Hex-encoded playlist revision; unchanged means the
-                      listing can be reused. Null for albums (immutable).
                   length:
                     type: integer
                     description: Number of track entries
