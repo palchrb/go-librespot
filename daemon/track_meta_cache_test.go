@@ -6,6 +6,7 @@ import (
 	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
+	extmetadatapb "github.com/devgianlu/go-librespot/proto/spotify/extendedmetadata"
 	metadatapb "github.com/devgianlu/go-librespot/proto/spotify/metadata"
 )
 
@@ -148,5 +149,29 @@ func TestContextListCacheSkipsEnumerationWhenCached(t *testing.T) {
 	c.put("spotify:playlist:a", []string{"spotify:track:1"}, time.Now().Add(-contextListTTL-time.Second))
 	if !c.beginFetch("spotify:playlist:a") {
 		t.Fatal("expected an expired listing to be re-enumerated")
+	}
+}
+
+// Each uri resolves under its own extended-metadata kind: a TRACK_V4 query for
+// an episode returns nothing, which is how shows used to enumerate to an empty
+// listing.
+func TestMetaExtensionKind(t *testing.T) {
+	cases := []struct {
+		uri  string
+		kind extmetadatapb.ExtensionKind
+		ok   bool
+	}{
+		{"spotify:track:4cOdK2wGLETKBW3PvgPWqT", extmetadatapb.ExtensionKind_TRACK_V4, true},
+		{"spotify:episode:4rOoJ6Egrf8K2IrywzwOMk", extmetadatapb.ExtensionKind_EPISODE_V4, true},
+		{"spotify:local:a:b:c:1", 0, false},
+		{"spotify:artist:0OdUWJ0sBjDrqHygGUXeCF", 0, false},
+		{"", 0, false},
+	}
+
+	for _, tc := range cases {
+		kind, ok := metaExtensionKind(tc.uri)
+		if ok != tc.ok || kind != tc.kind {
+			t.Fatalf("metaExtensionKind(%q) = (%v, %t), want (%v, %t)", tc.uri, kind, ok, tc.kind, tc.ok)
+		}
 	}
 }
