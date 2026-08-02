@@ -685,7 +685,27 @@ func (p *AppPlayer) shouldDeferSkip() bool {
 	}
 
 	d := p.app.cfg.SkipDebounce
-	return d > 0 && (p.settlePending || time.Since(p.lastSkipDone) < d)
+	if d <= 0 {
+		return false
+	}
+
+	// Log the decision with the gap that produced it: the useful signal when
+	// tuning skip_debounce_ms is how far apart skips actually arrive, which
+	// varies a lot by controller (a physical button mashes far faster than the
+	// Spotify app, which paces its Connect commands) and by how fast loads
+	// complete (a cached track loads in a fraction of the time, which widens
+	// the gap between one skip finishing and the next arriving).
+	since := time.Since(p.lastSkipDone)
+	defer_ := p.settlePending || since < d
+	if p.lastSkipDone.IsZero() {
+		p.app.log.Debugf("skip: loading inline (first skip, window %s)", d)
+	} else {
+		p.app.log.Debugf("skip: %s (%dms since last skip, window %s, settle pending: %t)",
+			map[bool]string{true: "deferring", false: "loading inline"}[defer_],
+			since.Milliseconds(), d, p.settlePending)
+	}
+
+	return defer_
 }
 
 // deferSettle publishes the pending pointer position (will_play event + coalesced state
@@ -694,6 +714,9 @@ func (p *AppPlayer) deferSettle(ctx context.Context) {
 	p.settlePending = true
 	p.settleTimer.Reset(p.app.cfg.SkipDebounce)
 	p.lastSkipDone = time.Now()
+
+	p.app.log.WithField("uri", p.state.player.Track.GetUri()).
+		Debugf("deferred skip, settling in %s unless another skip arrives", p.app.cfg.SkipDebounce)
 
 	// Publish the pending track without a stream: buffering, position 0.
 	p.state.updateTimestamp()
