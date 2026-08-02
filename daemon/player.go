@@ -681,7 +681,7 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 		return &ApiResponseCacheSnapshot{SnapshotId: &snapshotId, Length: content.Length}, nil
 	case ApiRequestTypeContextTracks:
 		data := req.Data.(ApiRequestDataContextTracks)
-		if _, err := librespot.SpotifyIdFromUri(data.Uri); err != nil {
+		if !isListableContextUri(data.Uri) {
 			return nil, ErrBadRequest
 		}
 

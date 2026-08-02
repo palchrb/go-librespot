@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -82,6 +83,45 @@ func (c *trackMetaCache) missing(uris []string) []string {
 // for; the connect-state window (prev + current + next) fits comfortably.
 const maxMetaBatch = 100
 
+// metaExtensionKind returns the extended-metadata kind that describes the given
+// uri, and whether the uri carries listable metadata at all. Anything else
+// (local files, unexpected uri forms) has none.
+//
+// Audiobook chapters are UNTESTED: audiobooks are not available in this
+// market, so the mapping rests on Spotify's own metadata proto — Episode
+// carries an is_audiobook_chapter flag, i.e. chapters are episodes in the
+// metadata model — rather than on observed traffic. If a chapter resolves to
+// something other than an Episode message, the strictly-typed unmarshal drops
+// it and the listing entry stays null; nothing breaks.
+func metaExtensionKind(uri string) (extmetadatapb.ExtensionKind, bool) {
+	switch {
+	case strings.HasPrefix(uri, "spotify:track:"):
+		return extmetadatapb.ExtensionKind_TRACK_V4, true
+	case strings.HasPrefix(uri, "spotify:episode:"):
+		return extmetadatapb.ExtensionKind_EPISODE_V4, true
+	case strings.HasPrefix(uri, "spotify:chapter:"):
+		return extmetadatapb.ExtensionKind_EPISODE_V4, true
+	}
+	return 0, false
+}
+
+// collectionUriRegexp matches a user's Liked Songs collection
+// (spotify:user:<id>:collection), whose multi-segment form the single-id
+// SpotifyIdFromUri regexp rejects.
+var collectionUriRegexp = regexp.MustCompile(`^spotify:user:[^:]+:collection$`)
+
+// isListableContextUri reports whether the uri names a context the listing
+// endpoint should try to enumerate: any single-id context (playlist, album,
+// artist, show, audiobook — the resolver decides what it can actually expand)
+// plus the collection form.
+func isListableContextUri(uri string) bool {
+	if collectionUriRegexp.MatchString(uri) {
+		return true
+	}
+	_, err := librespot.SpotifyIdFromUri(uri)
+	return err == nil
+}
+
 // scheduleMetaPrefetch batch-fetches metadata for the tracks in the current
 // state window (prev + current + next) that are not cached yet, so /status
 // can name pending and upcoming tracks (and their cover art) before their
@@ -95,8 +135,7 @@ func (p *AppPlayer) scheduleMetaPrefetch() {
 
 	var uris []string
 	add := func(uri string) {
-		// Only tracks: the batch queries TRACK_V4 metadata.
-		if strings.HasPrefix(uri, "spotify:track:") {
+		if _, ok := metaExtensionKind(uri); ok {
 			uris = append(uris, uri)
 		}
 	}
@@ -124,7 +163,7 @@ func (p *AppPlayer) scheduleMetaPrefetch() {
 	go p.fetchTrackMetadata(missing)
 }
 
-// fetchTrackMetadata resolves TRACK_V4 metadata for the given track URIs in a
+// fetchTrackMetadata resolves metadata for the given track/episode URIs in a
 // single batched extended-metadata request and fills the cache. Best-effort:
 // failures only cost the pending/next-track fields in /status.
 func (p *AppPlayer) fetchTrackMetadata(uris []string) {
@@ -143,16 +182,25 @@ func (p *AppPlayer) fetchTrackMetadata(uris []string) {
 }
 
 // fetchTrackMetadataBatch performs one batched extended-metadata request for
-// the given track URIs and fills the cache, returning how many were cached.
+// the given track/episode URIs and fills the cache, returning how many were
+// cached. Each uri is queried under its own kind (TRACK_V4 or EPISODE_V4), so
+// a mixed context — or a show — resolves in the same single request.
 func (p *AppPlayer) fetchTrackMetadataBatch(ctx context.Context, uris []string) (int, error) {
 	req := &extmetadatapb.BatchedEntityRequest{}
 	for _, uri := range uris {
+		kind, ok := metaExtensionKind(uri)
+		if !ok {
+			continue
+		}
 		req.EntityRequest = append(req.EntityRequest, &extmetadatapb.EntityRequest{
 			EntityUri: uri,
 			Query: []*extmetadatapb.ExtensionQuery{{
-				ExtensionKind: extmetadatapb.ExtensionKind_TRACK_V4,
+				ExtensionKind: kind,
 			}},
 		})
+	}
+	if len(req.EntityRequest) == 0 {
+		return 0, nil
 	}
 
 	resp, err := p.sess.Spclient().ExtendedMetadata(ctx, req)
@@ -162,20 +210,30 @@ func (p *AppPlayer) fetchTrackMetadataBatch(ctx context.Context, uris []string) 
 
 	var cached int
 	for _, item := range resp.ExtendedMetadata {
-		if item.ExtensionKind != extmetadatapb.ExtensionKind_TRACK_V4 {
-			continue
-		}
 		for _, extData := range item.ExtensionData {
 			if extData.Header == nil || extData.Header.StatusCode != 200 || extData.ExtensionData == nil {
 				continue
 			}
 
-			var trackMeta metadatapb.Track
-			if err := extData.ExtensionData.UnmarshalTo(&trackMeta); err != nil {
+			var media *librespot.Media
+			switch item.ExtensionKind {
+			case extmetadatapb.ExtensionKind_TRACK_V4:
+				var trackMeta metadatapb.Track
+				if err := extData.ExtensionData.UnmarshalTo(&trackMeta); err != nil {
+					continue
+				}
+				media = librespot.NewMediaFromTrack(&trackMeta)
+			case extmetadatapb.ExtensionKind_EPISODE_V4:
+				var episodeMeta metadatapb.Episode
+				if err := extData.ExtensionData.UnmarshalTo(&episodeMeta); err != nil {
+					continue
+				}
+				media = librespot.NewMediaFromEpisode(&episodeMeta)
+			default:
 				continue
 			}
 
-			p.metaCache.put(extData.EntityUri, librespot.NewMediaFromTrack(&trackMeta))
+			p.metaCache.put(extData.EntityUri, media)
 			cached++
 		}
 	}
@@ -277,8 +335,8 @@ func (c *contextListCache) put(uri string, uris []string, now time.Time) {
 // for concurrent use and the Run goroutine mutates it on every skip, and a fresh
 // list is in the context's own order rather than the shuffled playback order.
 //
-// Only track URIs are returned; episodes carry no TRACK_V4 metadata, so a show
-// context enumerates to nothing.
+// Track and episode URIs are returned; each is later resolved under its own
+// metadata kind, so playlists, albums, artists and shows all list.
 func (p *AppPlayer) resolveContextTracks(ctx context.Context, uri string) ([]string, error) {
 	if uris, ok := p.contextLists.get(uri); ok {
 		return uris, nil
@@ -296,7 +354,7 @@ func (p *AppPlayer) resolveContextTracks(ctx context.Context, uri string) ([]str
 
 	var uris []string
 	for _, t := range tl.AllTracks(ctx) {
-		if strings.HasPrefix(t.Uri, "spotify:track:") {
+		if _, ok := metaExtensionKind(t.Uri); ok {
 			uris = append(uris, t.Uri)
 		}
 		if len(uris) == fullMetaFetchLimit {
