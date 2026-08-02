@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -201,7 +203,24 @@ const contextListCacheLimit = 8
 
 type contextListEntry struct {
 	uris    []string
+	hash    string
 	fetched time.Time
+}
+
+// hashTrackUris digests an enumerated listing so a client can tell whether it
+// changed. This is not Spotify's playlist revision: it covers exactly the
+// tracks and their order, so adding, removing, moving or replacing a track
+// changes it, while renaming the playlist or swapping its cover does not.
+// For deciding whether a cached listing (or a pre-cached set of audio files)
+// is still current, that is the more precise signal of the two — and unlike a
+// revision it exists for every context type, not just playlists.
+func hashTrackUris(uris []string) string {
+	h := sha256.New()
+	for _, uri := range uris {
+		h.Write([]byte(uri))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // contextListCache remembers the track URIs of recently enumerated contexts.
@@ -245,15 +264,15 @@ func (c *contextListCache) endFetch(uri string) {
 	delete(c.inFlight, uri)
 }
 
-func (c *contextListCache) get(uri string) ([]string, bool) {
+func (c *contextListCache) get(uri string) ([]string, string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	e, ok := c.entries[uri]
 	if !ok || time.Since(e.fetched) > contextListTTL {
-		return nil, false
+		return nil, "", false
 	}
-	return e.uris, true
+	return e.uris, e.hash, true
 }
 
 func (c *contextListCache) put(uri string, uris []string, now time.Time) {
@@ -263,7 +282,7 @@ func (c *contextListCache) put(uri string, uris []string, now time.Time) {
 	if _, ok := c.entries[uri]; !ok {
 		c.order = append(c.order, uri)
 	}
-	c.entries[uri] = contextListEntry{uris: uris, fetched: now}
+	c.entries[uri] = contextListEntry{uris: uris, hash: hashTrackUris(uris), fetched: now}
 
 	for len(c.order) > contextListCacheLimit {
 		delete(c.entries, c.order[0])
@@ -280,7 +299,7 @@ func (c *contextListCache) put(uri string, uris []string, now time.Time) {
 // Only track URIs are returned; episodes carry no TRACK_V4 metadata, so a show
 // context enumerates to nothing.
 func (p *AppPlayer) resolveContextTracks(ctx context.Context, uri string) ([]string, error) {
-	if uris, ok := p.contextLists.get(uri); ok {
+	if uris, _, ok := p.contextLists.get(uri); ok {
 		return uris, nil
 	}
 
@@ -322,7 +341,7 @@ func (p *AppPlayer) scheduleContextEnumerate(contextUri string) {
 	// Already enumerated: the tracks are known, so go straight to the sweep —
 	// it may have been aborted, or the listing may have been enumerated by a
 	// caller that never swept it.
-	if uris, ok := p.contextLists.get(contextUri); ok {
+	if uris, _, ok := p.contextLists.get(contextUri); ok {
 		p.scheduleMetaSweep(uris, contextUri)
 		return
 	}
@@ -362,35 +381,91 @@ func (p *AppPlayer) scheduleContextMetaPrefetch(contextUri string) {
 	p.scheduleContextEnumerate(contextUri)
 }
 
+type metaSweepJob struct {
+	uris  []string
+	label string
+}
+
+// metaSweepQueue serialises the paced full-context sweeps: one runs at a time,
+// and one waits. A sweep takes seconds (batches are spaced to stay polite), so
+// a second context arriving mid-sweep is common — switching contexts while one
+// runs used to drop the new sweep on the floor, leaving that context with only
+// the moving window and nothing to trigger a retry.
+//
+// The waiting slot holds one job because only the newest matters: if a third
+// context arrives, the user has moved on from the second before its metadata
+// could have been of any use.
+type metaSweepQueue struct {
+	mu      sync.Mutex
+	running bool
+	pending *metaSweepJob
+}
+
+// enqueue submits a job, reporting whether the caller must start the worker.
+func (q *metaSweepQueue) enqueue(job metaSweepJob) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.running {
+		q.pending = &job
+		return false
+	}
+	q.running = true
+	q.pending = &job
+	return true
+}
+
+// next hands the worker its next job, or reports that it should stop.
+func (q *metaSweepQueue) next() (metaSweepJob, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.pending == nil {
+		q.running = false
+		return metaSweepJob{}, false
+	}
+	job := *q.pending
+	q.pending = nil
+	return job, true
+}
+
 // scheduleMetaSweep resolves metadata for the given track URIs in the
-// background (paced batches), for callers that already know the track list —
-// e.g. the /playlist/tracks endpoint. Single-flighted together with the
-// context sweep; when a sweep is already running the call is dropped and the
-// client's next poll picks up whatever has been cached meanwhile.
+// background, in paced batches. Sweeps are serialised: one runs while at most
+// one waits, and a job submitted while another is waiting replaces it.
 func (p *AppPlayer) scheduleMetaSweep(uris []string, label string) {
-	if p.metaCache == nil || p.sess == nil {
+	if p.metaCache == nil || p.sess == nil || len(uris) == 0 {
 		return
 	}
 
-	missing := p.metaCache.missing(uris)
-	if len(missing) == 0 {
-		return
-	}
-	if len(missing) > fullMetaFetchLimit {
-		missing = missing[:fullMetaFetchLimit]
-	}
-
-	if !p.fullMetaFetchInFlight.CompareAndSwap(false, true) {
+	if !p.metaSweeps.enqueue(metaSweepJob{uris: uris, label: label}) {
 		return
 	}
 
 	go func() {
-		defer p.fullMetaFetchInFlight.Store(false)
+		for {
+			job, ok := p.metaSweeps.next()
+			if !ok {
+				return
+			}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
+			// Resolve what is missing when the job runs, not when it was
+			// queued: a job that waited behind another sweep may have had
+			// part of its tracks cached meanwhile.
+			missing := p.metaCache.missing(job.uris)
+			if len(missing) > fullMetaFetchLimit {
+				missing = missing[:fullMetaFetchLimit]
+			}
+			if len(missing) == 0 {
+				continue
+			}
 
-		p.sweepBatches(ctx, missing, label)
+			func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+
+				p.sweepBatches(ctx, missing, job.label)
+			}()
+		}
 	}()
 }
 

@@ -96,8 +96,8 @@ type AppPlayer struct {
 	contextLists *contextListCache
 	// metaFetchInFlight single-flights the background window metadata fetch.
 	metaFetchInFlight atomic.Bool
-	// fullMetaFetchInFlight single-flights the background full-context sweep.
-	fullMetaFetchInFlight atomic.Bool
+	// metaSweeps serialises the background full-context metadata sweeps.
+	metaSweeps metaSweepQueue
 	// lastFullMetaContext is the context uri the last full sweep ran for, so
 	// replaying the same playlist does not re-sweep it. Run goroutine only.
 	lastFullMetaContext string
@@ -689,11 +689,12 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 		// poll until ready is true and cached == length.
 		p.scheduleContextEnumerate(data.Uri)
 
-		uris, ready := p.contextLists.get(data.Uri)
+		uris, hash, ready := p.contextLists.get(data.Uri)
 		resp := &ApiResponseContextTracks{
-			Uri:    data.Uri,
-			Ready:  ready,
-			Length: len(uris),
+			Uri:        data.Uri,
+			Ready:      ready,
+			TracksHash: hash,
+			Length:     len(uris),
 			Tracks: make([]ApiResponseContextTrackItem, 0, len(uris)),
 		}
 		for _, uri := range uris {

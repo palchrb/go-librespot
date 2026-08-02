@@ -189,6 +189,12 @@ type ApiResponseContextTracks struct {
 	// Ready is false while the context is still being enumerated in the
 	// background; the listing is empty until it flips to true.
 	Ready bool `json:"ready"`
+	// TracksHash digests the listed track uris and their order, so a client can
+	// tell whether a listing it cached is still current. Empty while not ready.
+	// It is not Spotify's playlist revision: it changes when a track is added,
+	// removed, moved or replaced, and does not change when the playlist is
+	// renamed or re-covered.
+	TracksHash string `json:"tracks_hash"`
 	// Length is the number of track entries in the listing.
 	Length int `json:"length"`
 	// Cached is how many entries carry full metadata; when Cached < Length a

@@ -75,15 +75,18 @@ func TestContextListCacheServesRepeatLookups(t *testing.T) {
 	c := newContextListCache()
 	now := time.Now()
 
-	if _, ok := c.get("spotify:playlist:a"); ok {
+	if _, _, ok := c.get("spotify:playlist:a"); ok {
 		t.Fatal("expected miss on empty cache")
 	}
 
 	c.put("spotify:playlist:a", []string{"spotify:track:1", "spotify:track:2"}, now)
 
-	uris, ok := c.get("spotify:playlist:a")
+	uris, hash, ok := c.get("spotify:playlist:a")
 	if !ok || len(uris) != 2 {
 		t.Fatalf("expected the enumerated listing back, got %v (ok=%t)", uris, ok)
+	}
+	if hash == "" {
+		t.Fatal("expected a hash over the listing")
 	}
 }
 
@@ -94,7 +97,7 @@ func TestContextListCacheExpires(t *testing.T) {
 
 	c.put("spotify:playlist:a", []string{"spotify:track:1"}, time.Now().Add(-contextListTTL-time.Second))
 
-	if _, ok := c.get("spotify:playlist:a"); ok {
+	if _, _, ok := c.get("spotify:playlist:a"); ok {
 		t.Fatal("expected an entry older than the TTL to be treated as a miss")
 	}
 }
@@ -110,10 +113,10 @@ func TestContextListCacheEviction(t *testing.T) {
 	if len(c.entries) != contextListCacheLimit {
 		t.Fatalf("expected the cache bounded to %d entries, got %d", contextListCacheLimit, len(c.entries))
 	}
-	if _, ok := c.get("spotify:playlist:0"); ok {
+	if _, _, ok := c.get("spotify:playlist:0"); ok {
 		t.Fatal("expected the oldest context evicted")
 	}
-	if _, ok := c.get(fmt.Sprintf("spotify:playlist:%d", contextListCacheLimit+2)); !ok {
+	if _, _, ok := c.get(fmt.Sprintf("spotify:playlist:%d", contextListCacheLimit+2)); !ok {
 		t.Fatal("expected the newest context retained")
 	}
 }
@@ -148,5 +151,39 @@ func TestContextListCacheSkipsEnumerationWhenCached(t *testing.T) {
 	c.put("spotify:playlist:a", []string{"spotify:track:1"}, time.Now().Add(-contextListTTL-time.Second))
 	if !c.beginFetch("spotify:playlist:a") {
 		t.Fatal("expected an expired listing to be re-enumerated")
+	}
+}
+
+// The hash is what a client compares to decide whether a listing it cached is
+// still current, so it must react to the edits that matter and only those.
+func TestHashTrackUris(t *testing.T) {
+	base := []string{"spotify:track:a", "spotify:track:b", "spotify:track:c"}
+
+	cases := []struct {
+		name string
+		uris []string
+		same bool
+	}{
+		{"same listing", []string{"spotify:track:a", "spotify:track:b", "spotify:track:c"}, true},
+		{"reordered", []string{"spotify:track:c", "spotify:track:b", "spotify:track:a"}, false},
+		{"track removed", []string{"spotify:track:a", "spotify:track:b"}, false},
+		{"track added", []string{"spotify:track:a", "spotify:track:b", "spotify:track:c", "spotify:track:d"}, false},
+		{"track replaced", []string{"spotify:track:a", "spotify:track:x", "spotify:track:c"}, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if same := hashTrackUris(tc.uris) == hashTrackUris(base); same != tc.same {
+				t.Fatalf("hash equal = %t, want %t", same, tc.same)
+			}
+		})
+	}
+}
+
+// Concatenating the uris would let a boundary shift produce the same digest;
+// the separator is what makes the listing unambiguous.
+func TestHashTrackUrisIsUnambiguous(t *testing.T) {
+	if hashTrackUris([]string{"ab", "c"}) == hashTrackUris([]string{"a", "bc"}) {
+		t.Fatal("expected different listings to hash differently")
 	}
 }

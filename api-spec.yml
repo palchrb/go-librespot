@@ -243,8 +243,7 @@ paths:
         Only tracks are listed; episodes are omitted, so a show enumerates to
         an empty listing. Long contexts are truncated to 800 tracks. Listings
         are reused for five minutes, so an edit made to a playlist within that
-        window is not reflected. To decide whether a cached listing is stale,
-        use GET /cache/snapshot.
+        window is not reflected.
       parameters:
         - name: uri
           in: query
@@ -268,6 +267,14 @@ paths:
                     description: >-
                       False while the context is still being enumerated in the
                       background; the listing is empty until it is true
+                  tracks_hash:
+                    type: string
+                    description: >-
+                      Digest of the listed track uris and their order; compare
+                      it to decide whether a cached listing is still current.
+                      Empty while not ready. Not Spotify's playlist revision —
+                      it changes when a track is added, removed, moved or
+                      replaced, and not when the playlist is renamed.
                   length:
                     type: integer
                     description: Number of track entries
