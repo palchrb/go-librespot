@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -203,24 +201,7 @@ const contextListCacheLimit = 8
 
 type contextListEntry struct {
 	uris    []string
-	hash    string
 	fetched time.Time
-}
-
-// hashTrackUris digests an enumerated listing so a client can tell whether it
-// changed. This is not Spotify's playlist revision: it covers exactly the
-// tracks and their order, so adding, removing, moving or replacing a track
-// changes it, while renaming the playlist or swapping its cover does not.
-// For deciding whether a cached listing (or a pre-cached set of audio files)
-// is still current, that is the more precise signal of the two — and unlike a
-// revision it exists for every context type, not just playlists.
-func hashTrackUris(uris []string) string {
-	h := sha256.New()
-	for _, uri := range uris {
-		h.Write([]byte(uri))
-		h.Write([]byte{0})
-	}
-	return hex.EncodeToString(h.Sum(nil))
 }
 
 // contextListCache remembers the track URIs of recently enumerated contexts.
@@ -264,15 +245,15 @@ func (c *contextListCache) endFetch(uri string) {
 	delete(c.inFlight, uri)
 }
 
-func (c *contextListCache) get(uri string) ([]string, string, bool) {
+func (c *contextListCache) get(uri string) ([]string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	e, ok := c.entries[uri]
 	if !ok || time.Since(e.fetched) > contextListTTL {
-		return nil, "", false
+		return nil, false
 	}
-	return e.uris, e.hash, true
+	return e.uris, true
 }
 
 func (c *contextListCache) put(uri string, uris []string, now time.Time) {
@@ -282,7 +263,7 @@ func (c *contextListCache) put(uri string, uris []string, now time.Time) {
 	if _, ok := c.entries[uri]; !ok {
 		c.order = append(c.order, uri)
 	}
-	c.entries[uri] = contextListEntry{uris: uris, hash: hashTrackUris(uris), fetched: now}
+	c.entries[uri] = contextListEntry{uris: uris, fetched: now}
 
 	for len(c.order) > contextListCacheLimit {
 		delete(c.entries, c.order[0])
@@ -299,7 +280,7 @@ func (c *contextListCache) put(uri string, uris []string, now time.Time) {
 // Only track URIs are returned; episodes carry no TRACK_V4 metadata, so a show
 // context enumerates to nothing.
 func (p *AppPlayer) resolveContextTracks(ctx context.Context, uri string) ([]string, error) {
-	if uris, _, ok := p.contextLists.get(uri); ok {
+	if uris, ok := p.contextLists.get(uri); ok {
 		return uris, nil
 	}
 
@@ -341,7 +322,7 @@ func (p *AppPlayer) scheduleContextEnumerate(contextUri string) {
 	// Already enumerated: the tracks are known, so go straight to the sweep —
 	// it may have been aborted, or the listing may have been enumerated by a
 	// caller that never swept it.
-	if uris, _, ok := p.contextLists.get(contextUri); ok {
+	if uris, ok := p.contextLists.get(contextUri); ok {
 		p.scheduleMetaSweep(uris, contextUri)
 		return
 	}
