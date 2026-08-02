@@ -210,7 +210,7 @@ func loadCLIConfig(cfg *cliConfig) error {
 		"volume_steps":   100,
 		"initial_volume": 100,
 
-		"skip_debounce_ms": 800,
+		"skip_debounce_ms": 600,
 
 		"credentials.type": "zeroconf",
 
