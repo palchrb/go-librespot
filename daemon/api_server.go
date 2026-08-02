@@ -333,9 +333,13 @@ func (p *AppPlayer) newApiResponseStatusMedia(media *librespot.Media, position i
 			AlbumCoverUrl: p.prodInfo.ImageUrl(albumCoverId),
 			Position:      position,
 			Duration:      int(*episode.Duration),
-			ReleaseDate:   "",
-			TrackNumber:   0,
-			DiscNumber:    0,
+			// The context order is the playback order, which for shows can be
+			// the reverse of what the official apps display (episodic shows
+			// list newest-first but play oldest-first); the publish date is
+			// what lets a client sort the listing however it wants.
+			ReleaseDate: episode.GetPublishTime().String(),
+			TrackNumber: 0,
+			DiscNumber:  0,
 		}
 	}
 }
