@@ -695,7 +695,7 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 			Ready:      ready,
 			TracksHash: hash,
 			Length:     len(uris),
-			Tracks: make([]ApiResponseContextTrackItem, 0, len(uris)),
+			Tracks:     make([]ApiResponseContextTrackItem, 0, len(uris)),
 		}
 		for _, uri := range uris {
 			entry := ApiResponseContextTrackItem{Uri: uri}
