@@ -228,19 +228,27 @@ paths:
   /context/tracks:
     get:
       description: >-
-        List a playlist's or album's tracks in order with metadata (name,
-        artists, cover art), fetched via the internal API (not the
-        rate-limited public Web API). Metadata comes from the daemon's cache;
-        entries the cache does not know yet have a null track, and the
-        request kicks off a background sweep for them, so re-polling shortly
-        after completes the listing (cached == length). Clients can render a
-        browsable song list from this and start any entry via POST
-        /player/play with the context uri and the track as skip_to_uri.
+        List a context's tracks in order with metadata (name, artists, cover
+        art), fetched via the internal API (not the rate-limited public Web
+        API). Any context the player can play is accepted — playlist, album,
+        artist — and enumerated the same way. The response never waits on the
+        network: the first call for an unknown context starts a background
+        enumeration and returns ready=false with an empty listing. Once ready
+        is true, entries whose metadata is not cached yet have a null track
+        while a background sweep fills them in. Poll until ready is true and
+        cached == length. Clients can render a browsable song list from this
+        and start any entry via POST /player/play with the context uri and the
+        track as skip_to_uri.
+
+        Only tracks are listed; episodes are omitted, so a show enumerates to
+        an empty listing. Long contexts are truncated to 800 tracks. Listings
+        are reused for five minutes, so an edit made to a playlist within that
+        window is not reflected.
       parameters:
         - name: uri
           in: query
           required: true
-          description: Spotify playlist or album URI
+          description: Spotify context URI (playlist, album, artist)
           schema:
             type: string
       responses:
@@ -254,12 +262,19 @@ paths:
                   uri:
                     type: string
                     description: The context URI
-                  snapshot_id:
-                    type: string
-                    nullable: true
+                  ready:
+                    type: boolean
                     description: >-
-                      Hex-encoded playlist revision; unchanged means the
-                      listing can be reused. Null for albums (immutable).
+                      False while the context is still being enumerated in the
+                      background; the listing is empty until it is true
+                  tracks_hash:
+                    type: string
+                    description: >-
+                      Digest of the listed track uris and their order; compare
+                      it to decide whether a cached listing is still current.
+                      Empty while not ready. Not Spotify's playlist revision —
+                      it changes when a track is added, removed, moved or
+                      replaced, and not when the playlist is renamed.
                   length:
                     type: integer
                     description: Number of track entries

@@ -27,8 +27,6 @@ import (
 	"github.com/devgianlu/go-librespot/dealer"
 	"github.com/devgianlu/go-librespot/player"
 	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
-	extmetadatapb "github.com/devgianlu/go-librespot/proto/spotify/extendedmetadata"
-	metadatapb "github.com/devgianlu/go-librespot/proto/spotify/metadata"
 	"github.com/devgianlu/go-librespot/session"
 	"github.com/devgianlu/go-librespot/spclient"
 	"github.com/devgianlu/go-librespot/tracks"
@@ -93,10 +91,13 @@ type AppPlayer struct {
 	// metaCache holds metadata for tracks around the playback position so /status can
 	// describe tracks whose stream is not loaded yet (pending skips, the upcoming track).
 	metaCache *trackMetaCache
+	// contextLists holds the enumerated track uris of recently listed contexts, so a
+	// client polling a filling sweep does not re-page the context on every poll.
+	contextLists *contextListCache
 	// metaFetchInFlight single-flights the background window metadata fetch.
 	metaFetchInFlight atomic.Bool
-	// fullMetaFetchInFlight single-flights the background full-context sweep.
-	fullMetaFetchInFlight atomic.Bool
+	// metaSweeps serialises the background full-context metadata sweeps.
+	metaSweeps metaSweepQueue
 	// lastFullMetaContext is the context uri the last full sweep ran for, so
 	// replaying the same playlist does not re-sweep it. Run goroutine only.
 	lastFullMetaContext string
@@ -674,126 +675,38 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 		return &ApiResponseCacheSnapshot{SnapshotId: &snapshotId, Length: content.Length}, nil
 	case ApiRequestTypeContextTracks:
 		data := req.Data.(ApiRequestDataContextTracks)
-		spotId, err := librespot.SpotifyIdFromUri(data.Uri)
-		if err != nil {
+		if _, err := librespot.SpotifyIdFromUri(data.Uri); err != nil {
 			return nil, ErrBadRequest
 		}
 
-		switch spotId.Type() {
-		case librespot.SpotifyIdTypePlaylist:
-			// One internal call yields the ordered track URIs; metadata comes
-			// from the daemon's cache, filled by the background sweep. Entries
-			// the cache does not know yet are returned with a null track — the
-			// request kicks a sweep for them, so a re-poll shortly after
-			// completes the listing.
-			content, err := p.sess.Spclient().GetPlaylist(ctx, *spotId)
-			if err != nil {
-				return nil, fmt.Errorf("failed fetching playlist: %w", err)
-			}
+		// The context resolver enumerates any context the player can play, so
+		// playlists, albums and artists all take the same path. Both halves fill
+		// in behind the response rather than blocking it: enumeration pages over
+		// the network and the metadata sweep is batched and paced, and this runs
+		// on the same goroutine as playback control. So answer with whatever is
+		// known — ready reports whether the track list itself is enumerated,
+		// cached how many of those tracks carry metadata — and let the client
+		// poll until ready is true and cached == length.
+		p.scheduleContextEnumerate(data.Uri)
 
-			resp := &ApiResponseContextTracks{
-				Uri:        data.Uri,
-				SnapshotId: pointer(hex.EncodeToString(content.Revision)),
-				Tracks:     []ApiResponseContextTrackItem{},
-			}
-
-			var uris []string
-			if content.Contents != nil {
-				for _, item := range content.Contents.Items {
-					uri := item.GetUri()
-					if !strings.HasPrefix(uri, "spotify:track:") {
-						continue
-					}
-					uris = append(uris, uri)
-
-					entry := ApiResponseContextTrackItem{Uri: uri}
-					if media := p.metaCache.get(uri); media != nil && p.prodInfo != nil {
-						entry.Track = p.newApiResponseStatusTrack(media, 0)
-						resp.Cached++
-					}
-					resp.Tracks = append(resp.Tracks, entry)
-				}
-			}
-			resp.Length = len(resp.Tracks)
-
-			p.scheduleMetaSweep(uris, data.Uri)
-			return resp, nil
-		case librespot.SpotifyIdTypeAlbum:
-			// A single ALBUM_V4 request yields the ordered disc/track listing.
-			// The embedded track protos are usually skeletal (little more than
-			// the gid), so metadata comes from the daemon's cache like for
-			// playlists: entries the cache does not know yet are returned with
-			// a null track, and the request kicks a TRACK_V4 sweep for them —
-			// a re-poll shortly after completes the listing. When the embedded
-			// proto does happen to be complete, it is used (and cached)
-			// directly after enriching it with the album back-reference.
-			var albumMeta metadatapb.Album
-			if err := p.sess.Spclient().ExtendedMetadataSimple(ctx, *spotId, extmetadatapb.ExtensionKind_ALBUM_V4, &albumMeta); err != nil {
-				return nil, fmt.Errorf("failed fetching album metadata: %w", err)
-			}
-
-			resp := &ApiResponseContextTracks{
-				Uri:    data.Uri,
-				Tracks: []ApiResponseContextTrackItem{},
-			}
-
-			var uris []string
-			for _, disc := range albumMeta.Disc {
-				for _, t := range disc.Track {
-					if len(t.Gid) == 0 {
-						continue
-					}
-					uri := librespot.SpotifyIdFromGid(librespot.SpotifyIdTypeTrack, t.Gid).Uri()
-					uris = append(uris, uri)
-					entry := ApiResponseContextTrackItem{Uri: uri}
-
-					if t.Album == nil {
-						t.Album = &metadatapb.Album{
-							Gid:        albumMeta.Gid,
-							Name:       albumMeta.Name,
-							Artist:     albumMeta.Artist,
-							Date:       albumMeta.Date,
-							Cover:      albumMeta.Cover,
-							CoverGroup: albumMeta.CoverGroup,
-						}
-					}
-					if t.DiscNumber == nil {
-						t.DiscNumber = pointer(disc.GetNumber())
-					}
-					if len(t.Artist) == 0 {
-						t.Artist = albumMeta.Artist
-					}
-
-					// newApiResponseStatusTrack dereferences these; fall back
-					// to the cache if the embedded proto is incomplete.
-					complete := t.Name != nil && t.Duration != nil && t.Number != nil &&
-						t.Album.Name != nil
-					for _, a := range t.Artist {
-						complete = complete && a.Name != nil
-					}
-
-					if complete {
-						media := librespot.NewMediaFromTrack(t)
-						p.metaCache.put(uri, media)
-						if p.prodInfo != nil {
-							entry.Track = p.newApiResponseStatusTrack(media, 0)
-						}
-					} else if media := p.metaCache.get(uri); media != nil && p.prodInfo != nil {
-						entry.Track = p.newApiResponseStatusTrack(media, 0)
-					}
-					if entry.Track != nil {
-						resp.Cached++
-					}
-					resp.Tracks = append(resp.Tracks, entry)
-				}
-			}
-			resp.Length = len(resp.Tracks)
-
-			p.scheduleMetaSweep(uris, data.Uri)
-			return resp, nil
-		default:
-			return nil, ErrBadRequest
+		uris, hash, ready := p.contextLists.get(data.Uri)
+		resp := &ApiResponseContextTracks{
+			Uri:        data.Uri,
+			Ready:      ready,
+			TracksHash: hash,
+			Length:     len(uris),
+			Tracks: make([]ApiResponseContextTrackItem, 0, len(uris)),
 		}
+		for _, uri := range uris {
+			entry := ApiResponseContextTrackItem{Uri: uri}
+			if media := p.metaCache.get(uri); media != nil && p.prodInfo != nil {
+				entry.Track = p.newApiResponseStatusTrack(media, 0)
+				resp.Cached++
+			}
+			resp.Tracks = append(resp.Tracks, entry)
+		}
+
+		return resp, nil
 	case ApiRequestTypeGetVolume:
 		return &ApiResponseVolume{
 			Max:   p.app.cfg.VolumeSteps,
