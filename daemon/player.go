@@ -680,17 +680,19 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 		}
 
 		// The context resolver enumerates any context the player can play, so
-		// playlists, albums and artists all take the same path. Metadata comes
-		// from the daemon's cache: entries it does not know yet are returned
-		// with a null track and the request kicks a background sweep for them,
-		// so a re-poll shortly after completes the listing.
-		uris, err := p.resolveContextTracks(ctx, data.Uri)
-		if err != nil {
-			return nil, err
-		}
+		// playlists, albums and artists all take the same path. Both halves fill
+		// in behind the response rather than blocking it: enumeration pages over
+		// the network and the metadata sweep is batched and paced, and this runs
+		// on the same goroutine as playback control. So answer with whatever is
+		// known — ready reports whether the track list itself is enumerated,
+		// cached how many of those tracks carry metadata — and let the client
+		// poll until ready is true and cached == length.
+		p.scheduleContextEnumerate(data.Uri)
 
+		uris, ready := p.contextLists.get(data.Uri)
 		resp := &ApiResponseContextTracks{
 			Uri:    data.Uri,
+			Ready:  ready,
 			Length: len(uris),
 			Tracks: make([]ApiResponseContextTrackItem, 0, len(uris)),
 		}
@@ -703,7 +705,6 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 			resp.Tracks = append(resp.Tracks, entry)
 		}
 
-		p.scheduleMetaSweep(uris, data.Uri)
 		return resp, nil
 	case ApiRequestTypeGetVolume:
 		return &ApiResponseVolume{

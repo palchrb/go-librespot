@@ -209,13 +209,40 @@ type contextListEntry struct {
 // sweep ask for the same context repeatedly, so without this a client polling
 // for a filling sweep would re-page the whole playlist on every poll.
 type contextListCache struct {
-	mu      sync.Mutex
-	entries map[string]contextListEntry
-	order   []string
+	mu       sync.Mutex
+	entries  map[string]contextListEntry
+	order    []string
+	inFlight map[string]bool
 }
 
 func newContextListCache() *contextListCache {
-	return &contextListCache{entries: map[string]contextListEntry{}}
+	return &contextListCache{
+		entries:  map[string]contextListEntry{},
+		inFlight: map[string]bool{},
+	}
+}
+
+// beginFetch claims the right to enumerate uri, reporting false when the
+// listing is already cached or another goroutine is already enumerating it.
+// A client polling every second must not spawn an enumeration per poll.
+func (c *contextListCache) beginFetch(uri string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if e, ok := c.entries[uri]; ok && time.Since(e.fetched) <= contextListTTL {
+		return false
+	}
+	if c.inFlight[uri] {
+		return false
+	}
+	c.inFlight[uri] = true
+	return true
+}
+
+func (c *contextListCache) endFetch(uri string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.inFlight, uri)
 }
 
 func (c *contextListCache) get(uri string) ([]string, bool) {
@@ -282,41 +309,57 @@ func (p *AppPlayer) resolveContextTracks(ctx context.Context, uri string) ([]str
 	return uris, nil
 }
 
-// scheduleContextMetaPrefetch resolves metadata for the WHOLE context in the
-// background: enumerate its tracks, then batched extended-metadata requests,
-// paced. After it completes every track in the context is known to /status
-// (pending_track/next_track) before the user skips anywhere. Runs on the Run
-// goroutine; the sweep is single-flighted and skipped when this context was
-// already swept.
-func (p *AppPlayer) scheduleContextMetaPrefetch(contextUri string) {
+// scheduleContextEnumerate enumerates a context and sweeps metadata for its
+// tracks, in the background. Nothing on the playback path waits for it: the
+// listing endpoint answers from whatever is already enumerated and cached, and
+// a caller that finds neither gets an empty, not-ready listing rather than a
+// blocked control loop. Safe to call from the Run goroutine — it only claims
+// the job and returns.
+func (p *AppPlayer) scheduleContextEnumerate(contextUri string) {
 	if p.metaCache == nil || p.sess == nil || contextUri == "" {
 		return
 	}
-	if contextUri == p.lastFullMetaContext {
+	// Already enumerated: the tracks are known, so go straight to the sweep —
+	// it may have been aborted, or the listing may have been enumerated by a
+	// caller that never swept it.
+	if uris, ok := p.contextLists.get(contextUri); ok {
+		p.scheduleMetaSweep(uris, contextUri)
 		return
 	}
-	if !p.fullMetaFetchInFlight.CompareAndSwap(false, true) {
+	if !p.contextLists.beginFetch(contextUri) {
 		return
 	}
 
-	p.lastFullMetaContext = contextUri
-	go p.fetchContextMetadata(contextUri)
+	go p.enumerateContext(contextUri)
 }
 
-// fetchContextMetadata is the background half of scheduleContextMetaPrefetch.
-func (p *AppPlayer) fetchContextMetadata(contextUri string) {
-	defer p.fullMetaFetchInFlight.Store(false)
+// enumerateContext is the background half of scheduleContextEnumerate.
+func (p *AppPlayer) enumerateContext(contextUri string) {
+	defer p.contextLists.endFetch(contextUri)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	uris, err := p.resolveContextTracks(ctx, contextUri)
 	if err != nil {
-		p.app.log.WithError(err).Warnf("failed enumerating context for metadata sweep: %s", contextUri)
+		p.app.log.WithError(err).Warnf("failed enumerating context: %s", contextUri)
 		return
 	}
 
-	p.sweepBatches(ctx, p.metaCache.missing(uris), contextUri)
+	p.scheduleMetaSweep(uris, contextUri)
+}
+
+// scheduleContextMetaPrefetch warms the metadata of the WHOLE context that just
+// started playing, so every track in it is known to /status
+// (pending_track/next_track) before the user skips anywhere. Skipped when this
+// context was already swept.
+func (p *AppPlayer) scheduleContextMetaPrefetch(contextUri string) {
+	if contextUri == "" || contextUri == p.lastFullMetaContext {
+		return
+	}
+
+	p.lastFullMetaContext = contextUri
+	p.scheduleContextEnumerate(contextUri)
 }
 
 // scheduleMetaSweep resolves metadata for the given track URIs in the

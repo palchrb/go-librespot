@@ -117,3 +117,36 @@ func TestContextListCacheEviction(t *testing.T) {
 		t.Fatal("expected the newest context retained")
 	}
 }
+
+// A client polls this endpoint while the enumeration runs; each poll must find
+// the job already claimed rather than start another one.
+func TestContextListCacheSingleFlightsEnumeration(t *testing.T) {
+	c := newContextListCache()
+
+	if !c.beginFetch("spotify:playlist:a") {
+		t.Fatal("expected the first caller to claim the enumeration")
+	}
+	if c.beginFetch("spotify:playlist:a") {
+		t.Fatal("expected a concurrent caller to be turned away")
+	}
+
+	c.endFetch("spotify:playlist:a")
+	if !c.beginFetch("spotify:playlist:a") {
+		t.Fatal("expected the job claimable again once the previous one finished")
+	}
+}
+
+// A cached listing needs no enumeration at all, however often it is asked for.
+func TestContextListCacheSkipsEnumerationWhenCached(t *testing.T) {
+	c := newContextListCache()
+	c.put("spotify:playlist:a", []string{"spotify:track:1"}, time.Now())
+
+	if c.beginFetch("spotify:playlist:a") {
+		t.Fatal("expected a cached listing to need no enumeration")
+	}
+
+	c.put("spotify:playlist:a", []string{"spotify:track:1"}, time.Now().Add(-contextListTTL-time.Second))
+	if !c.beginFetch("spotify:playlist:a") {
+		t.Fatal("expected an expired listing to be re-enumerated")
+	}
+}

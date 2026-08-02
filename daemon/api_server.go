@@ -186,6 +186,9 @@ type ApiResponseContextTrackItem struct {
 
 type ApiResponseContextTracks struct {
 	Uri string `json:"uri"`
+	// Ready is false while the context is still being enumerated in the
+	// background; the listing is empty until it flips to true.
+	Ready bool `json:"ready"`
 	// Length is the number of track entries in the listing.
 	Length int `json:"length"`
 	// Cached is how many entries carry full metadata; when Cached < Length a
