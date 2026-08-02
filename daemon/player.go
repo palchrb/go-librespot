@@ -36,8 +36,9 @@ type AppPlayer struct {
 	app  *App
 	sess *session.Session
 
-	stop   chan struct{}
-	logout chan *AppPlayer
+	stop      chan struct{}
+	closeOnce sync.Once
+	logout    chan *AppPlayer
 
 	player            *player.Player
 	initialVolumeOnce sync.Once
@@ -62,6 +63,11 @@ type AppPlayer struct {
 	state           *State
 	primaryStream   *player.Stream
 	secondaryStream *player.Stream
+
+	// resumeFinishedPlaybackId is the playback id of the stream most recently
+	// reported as listened to the end, so that unloading it cannot overwrite
+	// that with a position a moment short of the end.
+	resumeFinishedPlaybackId []byte
 
 	prefetchTimer *time.Timer
 
@@ -525,7 +531,7 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 		}
 
 		if p.primaryStream != nil && p.prodInfo != nil {
-			resp.Track = p.newApiResponseStatusTrack(p.primaryStream.Media, p.state.trackPosition())
+			resp.Track = p.newApiResponseStatusTrack(p.primaryStream, p.state.trackPosition())
 		}
 
 		// While a deferred skip awaits its load, the track object above still
@@ -534,7 +540,7 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 		if p.settlePending && p.state.player.Track != nil {
 			resp.PendingTrackUri = &p.state.player.Track.Uri
 			if media := p.metaCache.get(p.state.player.Track.Uri); media != nil && p.prodInfo != nil {
-				resp.PendingTrack = p.newApiResponseStatusTrack(media, 0)
+				resp.PendingTrack = p.newApiResponseStatusMedia(media, 0)
 			}
 		}
 
@@ -543,7 +549,7 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 		if p.state.tracks != nil && p.prodInfo != nil {
 			if next := p.state.tracks.PeekNext(ctx); next != nil {
 				if media := p.metaCache.get(next.Uri); media != nil {
-					resp.NextTrack = p.newApiResponseStatusTrack(media, 0)
+					resp.NextTrack = p.newApiResponseStatusMedia(media, 0)
 				}
 			}
 		}
@@ -699,7 +705,7 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 		for _, uri := range uris {
 			entry := ApiResponseContextTrackItem{Uri: uri}
 			if media := p.metaCache.get(uri); media != nil && p.prodInfo != nil {
-				entry.Track = p.newApiResponseStatusTrack(media, 0)
+				entry.Track = p.newApiResponseStatusMedia(media, 0)
 				resp.Cached++
 			}
 			resp.Tracks = append(resp.Tracks, entry)
@@ -842,10 +848,13 @@ func (p *AppPlayer) handleMprisEvent(ctx context.Context, req mpris.MediaPlayer2
 	return nil
 }
 
+// Close stops the player and releases its session.
 func (p *AppPlayer) Close() {
-	p.stop <- struct{}{}
-	p.player.Close()
-	p.sess.Close()
+	p.closeOnce.Do(func() {
+		p.stop <- struct{}{}
+		p.player.Close()
+		p.sess.Close()
+	})
 }
 
 func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRecv <-chan mpris.MediaPlayer2PlayerCommand) {
@@ -867,12 +876,39 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 	p.stateTimer = time.NewTimer(time.Minute)
 	p.stateTimer.Stop() // armed on demand by updateState
 
+	// The accesspoint and the dealer only close their receivers after giving
+	// up on reconnecting, so losing either means the session is gone for good
+	// and cannot recover on its own. sessionLost hands the player back to the
+	// daemon to be torn down and rebuilt, exactly as a remote logout does.
+	sessionLost := false
+	loseSession := func() (stop bool) {
+		if sessionLost {
+			return false
+		}
+		sessionLost = true
+
+		p.app.log.Warn("lost session, tearing down player to start a new one")
+
+		select {
+		case p.logout <- p:
+			// The daemon calls Close, which signals p.stop and ends this loop.
+			return false
+		case <-p.stop:
+			// Already being torn down for another reason.
+			return true
+		}
+	}
+
 	for {
 		select {
 		case <-p.stop:
 			return
 		case pkt, ok := <-apRecv:
 			if !ok {
+				apRecv = nil
+				if loseSession() {
+					return
+				}
 				continue
 			}
 
@@ -881,6 +917,10 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 			}
 		case msg, ok := <-msgRecv:
 			if !ok {
+				msgRecv = nil
+				if loseSession() {
+					return
+				}
 				continue
 			}
 
@@ -889,6 +929,10 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 			}
 		case req, ok := <-reqRecv:
 			if !ok {
+				reqRecv = nil
+				if loseSession() {
+					return
+				}
 				continue
 			}
 
@@ -901,6 +945,7 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 			}
 		case req, ok := <-apiRecv:
 			if !ok {
+				apiRecv = nil
 				continue
 			}
 
@@ -908,6 +953,7 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 			req.Reply(data, err)
 		case mprisReq, ok := <-mprisRecv:
 			if !ok {
+				mprisRecv = nil
 				continue
 			}
 
@@ -924,6 +970,7 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 			mprisReq.Reply(dbusError)
 		case ev, ok := <-playerRecv:
 			if !ok {
+				playerRecv = nil
 				continue
 			}
 

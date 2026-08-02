@@ -25,6 +25,7 @@
 - 🔊 **Multiple audio backends** — ALSA, PulseAudio, or a raw named pipe for custom routing.
 - 📊 **Loudness normalization** — Spotify-standard −14 LUFS (ITU-R BS.1770) with configurable pregain.
 - 🔀 **Crossfade** — configurable overlap between consecutive tracks.
+- 🎙️ **Podcast resume** — episodes pick up where you left off, and progress syncs back to your other devices.
 - 🎚️ **Flexible volume control** — independent, synchronized with the ALSA mixer, or fully external.
 - 💾 **On-disk audio cache** — skip re-downloading tracks, bounded by an LRU size limit.
 - 🔐 **Multiple login flows** — Zeroconf discovery, interactive OAuth, or a Spotify access token.
@@ -64,14 +65,14 @@ brew install go-librespot
 To build from source the following prerequisites are necessary:
 
 - Go 1.25 or higher
-- Libraries: `libogg`, `libvorbis`, `flac`, `libasound2`
+- Libraries: `libogg`, `libvorbis`, `flac`, `mpg123`, `libasound2`
 
 To install Go, download it from the [Go website](https://go.dev/dl/).
 
 To install the required libraries on Debian-based systems (Debian, Ubuntu, Raspbian), use:
 
 ```shell
-sudo apt-get install libogg-dev libvorbis-dev libflac-dev libasound2-dev
+sudo apt-get install libogg-dev libvorbis-dev libflac-dev libmpg123-dev libasound2-dev
 ```
 
 Once prerequisites are installed you can clone the repository and run the daemon with:
