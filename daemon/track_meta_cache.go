@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -83,17 +84,42 @@ func (c *trackMetaCache) missing(uris []string) []string {
 const maxMetaBatch = 100
 
 // metaExtensionKind returns the extended-metadata kind that describes the given
-// uri, and whether the uri carries listable metadata at all. Tracks and
-// episodes each have their own kind; anything else (local files, unexpected
-// uri forms) has none.
+// uri, and whether the uri carries listable metadata at all. Anything else
+// (local files, unexpected uri forms) has none.
+//
+// Audiobook chapters are UNTESTED: audiobooks are not available in this
+// market, so the mapping rests on Spotify's own metadata proto — Episode
+// carries an is_audiobook_chapter flag, i.e. chapters are episodes in the
+// metadata model — rather than on observed traffic. If a chapter resolves to
+// something other than an Episode message, the strictly-typed unmarshal drops
+// it and the listing entry stays null; nothing breaks.
 func metaExtensionKind(uri string) (extmetadatapb.ExtensionKind, bool) {
 	switch {
 	case strings.HasPrefix(uri, "spotify:track:"):
 		return extmetadatapb.ExtensionKind_TRACK_V4, true
 	case strings.HasPrefix(uri, "spotify:episode:"):
 		return extmetadatapb.ExtensionKind_EPISODE_V4, true
+	case strings.HasPrefix(uri, "spotify:chapter:"):
+		return extmetadatapb.ExtensionKind_EPISODE_V4, true
 	}
 	return 0, false
+}
+
+// collectionUriRegexp matches a user's Liked Songs collection
+// (spotify:user:<id>:collection), whose multi-segment form the single-id
+// SpotifyIdFromUri regexp rejects.
+var collectionUriRegexp = regexp.MustCompile(`^spotify:user:[^:]+:collection$`)
+
+// isListableContextUri reports whether the uri names a context the listing
+// endpoint should try to enumerate: any single-id context (playlist, album,
+// artist, show, audiobook — the resolver decides what it can actually expand)
+// plus the collection form.
+func isListableContextUri(uri string) bool {
+	if collectionUriRegexp.MatchString(uri) {
+		return true
+	}
+	_, err := librespot.SpotifyIdFromUri(uri)
+	return err == nil
 }
 
 // scheduleMetaPrefetch batch-fetches metadata for the tracks in the current

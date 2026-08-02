@@ -271,14 +271,22 @@ paths:
         track as skip_to_uri.
 
         Tracks and episodes are both listed, so shows enumerate to their
-        episodes. Long contexts are truncated to 800 entries. Listings
+        episodes. A user's Liked Songs collection
+        (spotify:user:<id>:collection) is accepted too. Audiobooks and
+        chapters are wired but UNTESTED (not available in this market):
+        chapters are queried as episodes, which is how Spotify's own metadata
+        model describes them; if that assumption fails, entries stay null
+        rather than erroring. Long contexts are truncated to 800 entries.
+        Listings
         are reused for five minutes, so an edit made to a playlist within that
         window is not reflected.
       parameters:
         - name: uri
           in: query
           required: true
-          description: Spotify context URI (playlist, album, artist, show)
+          description: >-
+            Spotify context URI (playlist, album, artist, show, collection;
+            audiobook untested)
           schema:
             type: string
       responses:

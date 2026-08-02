@@ -163,6 +163,7 @@ func TestMetaExtensionKind(t *testing.T) {
 	}{
 		{"spotify:track:4cOdK2wGLETKBW3PvgPWqT", extmetadatapb.ExtensionKind_TRACK_V4, true},
 		{"spotify:episode:4rOoJ6Egrf8K2IrywzwOMk", extmetadatapb.ExtensionKind_EPISODE_V4, true},
+		{"spotify:chapter:0D5wENdkdwbqlrHoaJ9g29", extmetadatapb.ExtensionKind_EPISODE_V4, true},
 		{"spotify:local:a:b:c:1", 0, false},
 		{"spotify:artist:0OdUWJ0sBjDrqHygGUXeCF", 0, false},
 		{"", 0, false},
@@ -172,6 +173,33 @@ func TestMetaExtensionKind(t *testing.T) {
 		kind, ok := metaExtensionKind(tc.uri)
 		if ok != tc.ok || kind != tc.kind {
 			t.Fatalf("metaExtensionKind(%q) = (%v, %t), want (%v, %t)", tc.uri, kind, ok, tc.kind, tc.ok)
+		}
+	}
+}
+
+// The listing accepts any single-id context plus the multi-segment Liked
+// Songs collection; playable-entity uris and garbage are for /player/play
+// and the resolver to argue about, but the malformed must be rejected here.
+func TestIsListableContextUri(t *testing.T) {
+	cases := []struct {
+		uri string
+		ok  bool
+	}{
+		{"spotify:playlist:0hgSZmY9xhzx51hlLB2arI", true},
+		{"spotify:album:4rxfprnLYz3592ZGaeqcON", true},
+		{"spotify:artist:0OdUWJ0sBjDrqHygGUXeCF", true},
+		{"spotify:show:4rOoJ6Egrf8K2IrywzwOMk", true},
+		{"spotify:audiobook:7iHfbu1YPACw6oZPAFJtqe", true},
+		{"spotify:user:breyholtz:collection", true},
+		{"spotify:user:breyholtz:collection:extra", false},
+		{"spotify:collection", false},
+		{"not a uri", false},
+		{"", false},
+	}
+
+	for _, tc := range cases {
+		if got := isListableContextUri(tc.uri); got != tc.ok {
+			t.Fatalf("isListableContextUri(%q) = %t, want %t", tc.uri, got, tc.ok)
 		}
 	}
 }
