@@ -5,7 +5,7 @@ RUN sed -i 's/deb.debian.org/archive.debian.org/' /etc/apt/sources.list && \
     apt-get update && apt-get install -y wget curl git zip gcc g++ make autoconf autopoint pkg-config libtool
 
 # Install golang
-RUN wget https://go.dev/dl/go1.25.5.linux-amd64.tar.gz && \
+RUN wget --tries=5 --waitretry=10 --retry-connrefused https://go.dev/dl/go1.25.5.linux-amd64.tar.gz && \
     tar -C /usr/local -xzf go1.25.5.linux-amd64.tar.gz && \
     rm go1.25.5.linux-amd64.tar.gz
 ENV PATH="/usr/local/go/bin:$PATH"
@@ -14,7 +14,7 @@ ENV PATH="/usr/local/go/bin:$PATH"
 ARG TARGET
 RUN if [ "$TARGET" = "arm-rpi-linux-gnueabihf" ]; then \
         cd /tmp && \
-        wget https://github.com/devgianlu/rpi-toolchain/releases/download/v1/arm-rpi-linux-gnueabihf.tar.gz && \
+        wget --tries=5 --waitretry=10 --retry-connrefused https://github.com/devgianlu/rpi-toolchain/releases/download/v1/arm-rpi-linux-gnueabihf.tar.gz && \
         tar -C /usr --strip-components=1 -xzf arm-rpi-linux-gnueabihf.tar.gz ; \
     else \
         apt-get install -y "gcc-$TARGET" ; \
