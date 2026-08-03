@@ -191,8 +191,8 @@ func TestIsListableContextUri(t *testing.T) {
 		{"spotify:show:4rOoJ6Egrf8K2IrywzwOMk", true},
 		{"spotify:audiobook:7iHfbu1YPACw6oZPAFJtqe", true},
 		{"spotify:user:breyholtz:collection", true},
-		{"spotify:user:breyholtz:collection:extra", false},
-		{"spotify:collection", false},
+		{"spotify:user:breyholtz:collection:your-episodes", true},
+		{"spotify:concert:3Ph3fvw2WeVfvBBjT13yeN", false},
 		{"not a uri", false},
 		{"", false},
 	}

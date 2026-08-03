@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -105,21 +104,13 @@ func metaExtensionKind(uri string) (extmetadatapb.ExtensionKind, bool) {
 	return 0, false
 }
 
-// collectionUriRegexp matches a user's Liked Songs collection
-// (spotify:user:<id>:collection), whose multi-segment form the single-id
-// SpotifyIdFromUri regexp rejects.
-var collectionUriRegexp = regexp.MustCompile(`^spotify:user:[^:]+:collection$`)
-
 // isListableContextUri reports whether the uri names a context the listing
-// endpoint should try to enumerate: any single-id context (playlist, album,
-// artist, show, audiobook — the resolver decides what it can actually expand)
-// plus the collection form.
+// endpoint should try to enumerate. Piggybacks on the item-type inference:
+// any context whose items it can classify (playlist, album, artist, show, a
+// user's Liked Songs collection, ...) is worth handing to the resolver, and
+// anything it cannot classify would fail there anyway.
 func isListableContextUri(uri string) bool {
-	if collectionUriRegexp.MatchString(uri) {
-		return true
-	}
-	_, err := librespot.SpotifyIdFromUri(uri)
-	return err == nil
+	return librespot.InferSpotifyIdTypeFromContextUri(uri) != librespot.SpotifyIdTypeUnknown
 }
 
 // scheduleMetaPrefetch batch-fetches metadata for the tracks in the current
