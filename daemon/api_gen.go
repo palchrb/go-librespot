@@ -43,6 +43,58 @@ type ApiCacheSnapshot struct {
 	SnapshotId *string `json:"snapshot_id"`
 }
 
+// ApiConnectDevice A Spotify Connect device in the account's device cluster
+type ApiConnectDevice struct {
+	// Active Whether this device currently owns playback
+	Active bool `json:"active"`
+
+	// Brand The device brand, empty when not reported
+	Brand string `json:"brand"`
+
+	// CanPlay Whether the device can accept playback
+	CanPlay bool `json:"can_play"`
+
+	// Id The Spotify Connect device ID
+	Id string `json:"id"`
+
+	// Model The device model, empty when not reported
+	Model string `json:"model"`
+
+	// Name The device name
+	Name string `json:"name"`
+
+	// Self Whether this device is the daemon itself
+	Self bool `json:"self"`
+
+	// Type The device type, for example COMPUTER or SPEAKER
+	Type string `json:"type"`
+
+	// Volume The device volume, from 0 to 65535
+	Volume uint32 `json:"volume"`
+
+	// VolumeSteps The device's volume step count, 0 when not reported
+	VolumeSteps int32 `json:"volume_steps"`
+}
+
+// ApiConnectDevices The account's Spotify Connect device cluster
+type ApiConnectDevices struct {
+	// ActiveDeviceId Device ID that owns playback, or null when nothing is active
+	ActiveDeviceId *string            `json:"active_device_id"`
+	Devices        []ApiConnectDevice `json:"devices"`
+
+	// UpdatedAt When the cluster was last seen, as a unix millisecond timestamp; null when no cluster has been received yet. Cluster pushes only arrive on change, so an old timestamp on a quiet account is normal, not an error.
+	UpdatedAt *int64 `json:"updated_at"`
+}
+
+// ApiConnectTransfer A transfer playback payload
+type ApiConnectTransfer struct {
+	// DeviceId The Spotify Connect device ID to move playback to
+	DeviceId string `json:"device_id"`
+
+	// RestorePaused What the target should do with a paused session: "restore" keeps it paused, "resume" starts playing. Empty leaves it to the service's default.
+	RestorePaused string `json:"restore_paused,omitempty"`
+}
+
 // ApiContextTrackItem One entry of a context listing
 type ApiContextTrackItem struct {
 	// Track Full track metadata, or null while the background sweep has not resolved this entry yet
@@ -276,6 +328,9 @@ type GetContextTracksParams struct {
 // CacheDownloadJSONRequestBody defines body for CacheDownload for application/json ContentType.
 type CacheDownloadJSONRequestBody = ApiCacheDownload
 
+// ConnectTransferJSONRequestBody defines body for ConnectTransfer for application/json ContentType.
+type ConnectTransferJSONRequestBody = ApiConnectTransfer
+
 // PlayerAddToQueueJSONRequestBody defines body for PlayerAddToQueue for application/json ContentType.
 type PlayerAddToQueueJSONRequestBody = ApiAddToQueue
 
@@ -317,6 +372,12 @@ type ServerInterface interface {
 
 	// (GET /cache/snapshot)
 	GetCacheSnapshot(w http.ResponseWriter, r *http.Request, params GetCacheSnapshotParams)
+
+	// (GET /connect/devices)
+	GetConnectDevices(w http.ResponseWriter, r *http.Request)
+
+	// (POST /connect/transfer)
+	ConnectTransfer(w http.ResponseWriter, r *http.Request)
 
 	// (GET /context/tracks)
 	GetContextTracks(w http.ResponseWriter, r *http.Request, params GetContextTracksParams)
@@ -441,6 +502,34 @@ func (siw *ServerInterfaceWrapper) GetCacheSnapshot(w http.ResponseWriter, r *ht
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetCacheSnapshot(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetConnectDevices operation middleware
+func (siw *ServerInterfaceWrapper) GetConnectDevices(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetConnectDevices(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ConnectTransfer operation middleware
+func (siw *ServerInterfaceWrapper) ConnectTransfer(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ConnectTransfer(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -873,6 +962,8 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("GET "+options.BaseURL+"/{$}", wrapper.GetRoot)
 	m.HandleFunc("POST "+options.BaseURL+"/cache/download", wrapper.CacheDownload)
 	m.HandleFunc("GET "+options.BaseURL+"/cache/snapshot", wrapper.GetCacheSnapshot)
+	m.HandleFunc("GET "+options.BaseURL+"/connect/devices", wrapper.GetConnectDevices)
+	m.HandleFunc("POST "+options.BaseURL+"/connect/transfer", wrapper.ConnectTransfer)
 	m.HandleFunc("GET "+options.BaseURL+"/context/tracks", wrapper.GetContextTracks)
 	m.HandleFunc("GET "+options.BaseURL+"/events", wrapper.GetEvents)
 	m.HandleFunc("POST "+options.BaseURL+"/player/add_to_queue", wrapper.PlayerAddToQueue)

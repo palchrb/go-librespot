@@ -83,6 +83,8 @@ const (
 	ApiRequestTypeCacheSnapshot       ApiRequestType = "cache_snapshot"
 	ApiRequestTypeReopenOutput        ApiRequestType = "reopen_output"
 	ApiRequestTypeContextTracks       ApiRequestType = "context_tracks"
+	ApiRequestTypeConnectDevices      ApiRequestType = "connect_devices"
+	ApiRequestTypeConnectTransfer     ApiRequestType = "connect_transfer"
 )
 
 type ApiEventType string
@@ -442,6 +444,25 @@ func (s *ConcreteApiServer) GetRoot(w http.ResponseWriter, _ *http.Request) {
 
 func (s *ConcreteApiServer) GetStatus(w http.ResponseWriter, _ *http.Request) {
 	s.handleRequest(ApiRequest{Type: ApiRequestTypeStatus}, w)
+}
+
+func (s *ConcreteApiServer) GetConnectDevices(w http.ResponseWriter, _ *http.Request) {
+	s.handleRequest(ApiRequest{Type: ApiRequestTypeConnectDevices}, w)
+}
+
+func (s *ConcreteApiServer) ConnectTransfer(w http.ResponseWriter, r *http.Request) {
+	var data ApiConnectTransfer
+	if err := jsonDecode(r, &data); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	if len(data.DeviceId) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	s.handleRequest(ApiRequest{Type: ApiRequestTypeConnectTransfer, Data: data}, w)
 }
 
 func (s *ConcreteApiServer) GetContextTracks(w http.ResponseWriter, _ *http.Request, params GetContextTracksParams) {
