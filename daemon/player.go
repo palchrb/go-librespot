@@ -199,6 +199,11 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 			return fmt.Errorf("failed unmarshalling ClusterUpdate: %w", err)
 		}
 
+		if clusterUpdate.Cluster == nil {
+			return nil
+		}
+		p.state.storeCluster(clusterUpdate.Cluster)
+
 		stopBeingActive := p.state.active && clusterUpdate.Cluster.ActiveDeviceId != p.app.deviceId && clusterUpdate.Cluster.PlayerState.Timestamp > p.state.lastTransferTimestamp
 
 		// We are still the active device, do not quit
@@ -717,6 +722,10 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 		}
 
 		return resp, nil
+	case ApiRequestTypeConnectDevices:
+		return p.apiConnectDevices(), nil
+	case ApiRequestTypeConnectTransfer:
+		return nil, p.apiConnectTransfer(ctx, req.Data.(ApiConnectTransfer))
 	case ApiRequestTypeGetVolume:
 		return &ApiVolume{
 			Max:   p.app.cfg.VolumeSteps,

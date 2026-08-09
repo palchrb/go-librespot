@@ -143,6 +143,8 @@ var endpointMethods = map[string][]string{
 	"/player/shuffle_context": {http.MethodPost},
 	"/player/add_to_queue":    {http.MethodPost},
 	"/player/output":          {http.MethodPost},
+	"/connect/devices":        {http.MethodGet},
+	"/connect/transfer":       {http.MethodPost},
 }
 
 func TestApiRejectsWrongMethod(t *testing.T) {
@@ -665,4 +667,53 @@ func TestApiEventsWebsocketReceivesEmittedEvents(t *testing.T) {
 	_, raw, err := conn.Read(ctx)
 	require.NoError(t, err)
 	require.JSONEq(t, `{"type":"volume","data":{"value":55,"max":100}}`, string(raw))
+}
+
+func TestApiConnectDevices(t *testing.T) {
+	updatedAt := int64(1700000000000)
+	active := "self-id"
+	ts := newTestServer(t, func(req ApiRequest) (any, error) {
+		require.Equal(t, ApiRequestTypeConnectDevices, req.Type)
+		return &ApiConnectDevices{
+			ActiveDeviceId: &active,
+			UpdatedAt:      &updatedAt,
+			Devices: []ApiConnectDevice{
+				{Id: "self-id", Name: "tunebox", Type: "SPEAKER", Active: true, Self: true, CanPlay: true, Volume: 3276, VolumeSteps: 100},
+			},
+		}, nil
+	})
+
+	resp := ts.do(http.MethodGet, "/connect/devices", nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Equal(t, "self-id", body["active_device_id"])
+	require.Equal(t, float64(updatedAt), body["updated_at"])
+	devices := body["devices"].([]any)
+	require.Len(t, devices, 1)
+	device := devices[0].(map[string]any)
+	require.Equal(t, "tunebox", device["name"])
+	require.Equal(t, true, device["self"])
+}
+
+func TestApiConnectTransfer(t *testing.T) {
+	ts := newTestServer(t, func(req ApiRequest) (any, error) {
+		data := req.Data.(ApiConnectTransfer)
+		require.Equal(t, "phone-id", data.DeviceId)
+		require.Equal(t, "restore", data.RestorePaused)
+		return nil, nil
+	})
+
+	resp := ts.do(http.MethodPost, "/connect/transfer", `{"device_id":"phone-id","restore_paused":"restore"}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	ts.request()
+
+	// The device_id is the one thing the HTTP layer itself must reject.
+	resp = ts.do(http.MethodPost, "/connect/transfer", `{}`)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	ts.requireNoRequest()
+
+	resp = ts.do(http.MethodPost, "/connect/transfer", `not json`)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	ts.requireNoRequest()
 }

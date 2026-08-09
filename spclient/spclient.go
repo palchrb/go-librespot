@@ -86,7 +86,11 @@ func (c *Spclient) innerRequest(ctx context.Context, method string, reqUrl *url.
 	req.Header.Set("Client-Token", c.clientToken)
 
 	if body != nil {
-		req.Header.Set("Content-Type", "application/x-protobuf")
+		// Callers that send something other than protobuf (the connect
+		// transfer command is JSON) set their own Content-Type; don't clobber it.
+		if req.Header.Get("Content-Type") == "" {
+			req.Header.Set("Content-Type", "application/x-protobuf")
+		}
 
 		req.GetBody = func() (io.ReadCloser, error) {
 			return io.NopCloser(bytes.NewReader(body)), nil
@@ -194,12 +198,69 @@ func (c *Spclient) PutConnectStateInactive(ctx context.Context, spotConnId strin
 	}
 }
 
-func (c *Spclient) PutConnectState(ctx context.Context, spotConnId string, reqProto *connectpb.PutStateRequest) error {
+// PutConnectState publishes the device state and returns the account's device
+// cluster from the response body when the service provides one (nil otherwise;
+// the cluster is a freshness bonus, never a requirement).
+// connectTransferBody builds the JSON body of a transfer command. The
+// transfer_options object mirrors the restore_paused option the daemon itself
+// receives on inbound transfers; empty restorePaused omits the options object
+// entirely and leaves the behavior to the service's defaults.
+func connectTransferBody(restorePaused string) ([]byte, error) {
+	if restorePaused == "" {
+		return []byte("{}"), nil
+	}
+	return json.Marshal(map[string]any{
+		"transfer_options": map[string]string{"restore_paused": restorePaused},
+	})
+}
+
+// ConnectTransfer asks the connect-state service to move the playback session
+// owned by fromDeviceId onto toDeviceId. The service builds the TransferState
+// from the source device's published state and delivers it to the target as a
+// dealer "transfer" command — the caller never serializes playback state.
+//
+// A 429 is returned as a RateLimitedError so callers can surface it as such
+// instead of a generic failure.
+func (c *Spclient) ConnectTransfer(ctx context.Context, fromDeviceId, toDeviceId, restorePaused string) error {
+	body, err := connectTransferBody(restorePaused)
+	if err != nil {
+		return fmt.Errorf("failed marshalling transfer body: %w", err)
+	}
+
+	resp, err := c.Request(
+		ctx,
+		"POST",
+		fmt.Sprintf("/connect-state/v1/connect/transfer/from/%s/to/%s", fromDeviceId, toDeviceId),
+		nil,
+		http.Header{"Content-Type": []string{"application/json"}},
+		body,
+	)
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return &RateLimitedError{
+			RetryAfter: parseRetryAfter(resp.Header),
+			err:        fmt.Errorf("connect transfer request failed with status %d", resp.StatusCode),
+		}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("connect transfer request failed with status %d", resp.StatusCode)
+	}
+
+	c.log.Debugf("requested transfer to device %s", toDeviceId)
+	return nil
+}
+
+func (c *Spclient) PutConnectState(ctx context.Context, spotConnId string, reqProto *connectpb.PutStateRequest) (*connectpb.Cluster, error) {
 	reqBody, err := proto.Marshal(reqProto)
 	if err != nil {
-		return fmt.Errorf("failed marshalling PutStateRequest: %w", err)
+		return nil, fmt.Errorf("failed marshalling PutStateRequest: %w", err)
 	}
-	_, err = backoff.RetryWithData(func() (*http.Response, error) {
+	respBody, err := backoff.RetryWithData(func() ([]byte, error) {
 		resp, err := c.Request(
 			ctx,
 			"PUT",
@@ -237,13 +298,31 @@ func (c *Spclient) PutConnectState(ctx context.Context, spotConnId string, reqPr
 			return nil, reqErr
 		} else {
 			c.log.Debugf("put connect state because %s", reqProto.PutStateReason)
-			return resp, nil
+			body, _ := io.ReadAll(resp.Body)
+			return body, nil
 		}
 	}, backoff.WithContext(backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Second), 2), ctx))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return parseClusterResponse(c.log, respBody), nil
+}
+
+// parseClusterResponse decodes the connect-state PUT response body as a device
+// cluster. Best-effort by design: the body being the cluster is observed
+// behavior rather than a documented contract, so a format drift must never be
+// able to break state publishing — failures return nil.
+func parseClusterResponse(log librespot.Logger, body []byte) *connectpb.Cluster {
+	if len(body) == 0 {
+		return nil
+	}
+
+	var cluster connectpb.Cluster
+	if err := proto.Unmarshal(body, &cluster); err != nil {
+		log.WithError(err).Debugf("failed parsing connect state response as cluster")
+		return nil
+	}
+	return &cluster
 }
 
 // RateLimitedError reports a connect-state 429; RetryAfter is the advised cooldown.

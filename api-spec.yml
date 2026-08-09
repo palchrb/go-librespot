@@ -265,6 +265,83 @@ components:
           description: Number of tracks in the playlist, when available
           type: integer
           nullable: true
+    connectDevice:
+      x-go-name: ApiConnectDevice
+      description: A Spotify Connect device in the account's device cluster
+      type: object
+      required: [ id, name, type, brand, model, active, self, can_play, volume, volume_steps ]
+      properties:
+        id:
+          description: The Spotify Connect device ID
+          type: string
+        name:
+          description: The device name
+          type: string
+        type:
+          description: The device type, for example COMPUTER or SPEAKER
+          type: string
+        brand:
+          description: The device brand, empty when not reported
+          type: string
+        model:
+          description: The device model, empty when not reported
+          type: string
+        active:
+          description: Whether this device currently owns playback
+          type: boolean
+        self:
+          description: Whether this device is the daemon itself
+          type: boolean
+        can_play:
+          description: Whether the device can accept playback
+          type: boolean
+        volume:
+          description: The device volume, from 0 to 65535
+          type: integer
+          format: uint32
+        volume_steps:
+          description: The device's volume step count, 0 when not reported
+          type: integer
+          format: int32
+    connectDevices:
+      x-go-name: ApiConnectDevices
+      description: The account's Spotify Connect device cluster
+      type: object
+      required: [ active_device_id, updated_at, devices ]
+      properties:
+        active_device_id:
+          description: Device ID that owns playback, or null when nothing is active
+          type: string
+          nullable: true
+        updated_at:
+          description: >-
+            When the cluster was last seen, as a unix millisecond timestamp;
+            null when no cluster has been received yet. Cluster pushes only
+            arrive on change, so an old timestamp on a quiet account is
+            normal, not an error.
+          type: integer
+          format: int64
+          nullable: true
+        devices:
+          type: array
+          items:
+            $ref: '#/components/schemas/connectDevice'
+    connectTransfer:
+      x-go-name: ApiConnectTransfer
+      description: A transfer playback payload
+      type: object
+      required: [ device_id ]
+      properties:
+        device_id:
+          description: The Spotify Connect device ID to move playback to
+          type: string
+        restore_paused:
+          description: >-
+            What the target should do with a paused session: "restore" keeps
+            it paused, "resume" starts playing. Empty leaves it to the
+            service's default.
+          type: string
+          x-go-type-skip-optional-pointer: true
     root:
       x-go-name: ApiRoot
       description: API reachability and playback readiness
@@ -636,6 +713,57 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/cacheSnapshot'
+  /connect/devices:
+    get:
+      operationId: getConnectDevices
+      description: >-
+        List the account's Spotify Connect devices from the device cluster the
+        daemon receives over its own Spotify connection — no Web API involved,
+        and the request never triggers any network call. The listing reflects
+        the most recent cluster the daemon has seen; right after startup or a
+        reconnect it may contain only this device until Spotify pushes an
+        update. Devices linger after going offline (the cluster only shrinks
+        on explicit disappearance), so presence in the list does not guarantee
+        reachability.
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connectDevices'
+        204:
+          description: No active session
+  /connect/transfer:
+    post:
+      operationId: connectTransfer
+      description: >-
+        Move the current playback session to another device on the account,
+        via the internal connect-state API. The target must appear in
+        /connect/devices, must not be this device, and this device must be
+        the active player. A 200 means Spotify accepted the request; the
+        transfer completing is signalled by the usual inactive/stopped event
+        sequence, and a client should apply its own timeout for targets that
+        turn out to be offline.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/connectTransfer'
+      responses:
+        200:
+          description: Transfer request accepted by Spotify
+        204:
+          description: No active session
+        400:
+          description: >-
+            The device_id is missing, is this device, or this device is not
+            the active player
+        404:
+          description: The device is not present in the cluster
+        429:
+          description: Spotify rate-limited the transfer request
   /player/resume:
     post:
       operationId: playerResume
