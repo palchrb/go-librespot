@@ -38,3 +38,24 @@ func TestParseClusterResponse(t *testing.T) {
 		t.Fatal("expected nil for garbage")
 	}
 }
+
+// The transfer body is one of the two Spotify-facing unknowns of the feature;
+// lock its exact wire form so a refactor cannot silently change what the
+// field-tested contract sends.
+func TestConnectTransferBody(t *testing.T) {
+	body, err := connectTransferBody("restore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(body); got != `{"transfer_options":{"restore_paused":"restore"}}` {
+		t.Fatalf("unexpected body: %s", got)
+	}
+
+	body, err = connectTransferBody("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(body); got != `{}` {
+		t.Fatalf("expected empty object for no options, got %s", got)
+	}
+}
