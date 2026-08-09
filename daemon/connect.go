@@ -73,17 +73,36 @@ func (p *AppPlayer) apiConnectDevices() *ApiConnectDevices {
 	return clusterToApiDevices(p.state.lastCluster, p.state.device, p.app.deviceId, p.state.lastClusterAt)
 }
 
+// transferSource picks the {from} device for a transfer. Sending away moves
+// our own session; pulling home (target == self) moves the session of
+// whichever device the cluster says is active.
+func transferSource(cluster *connectpb.Cluster, selfId, target string) string {
+	if target == selfId {
+		return cluster.GetActiveDeviceId()
+	}
+	return selfId
+}
+
 // validateTransferTarget applies the local rejections that must happen before
-// any network call. Transfer-to-self is refused because the service would
-// bounce a transfer command straight back at us, forcing a full reload of the
-// very stream that is playing. An unknown target is a lookup miss, not a bad
-// request. Forwarding a transfer while we are not the active player is
-// refused outright: the service's from/to semantics for that case are
-// unverified, and the worst plausible interpretation moves some other
-// device's playback.
+// any network call.
+//
+// Sending away (target elsewhere) requires us to be the active player: the
+// from/to semantics of moving a third device's session are unverified, and
+// the worst plausible interpretation moves someone else's playback.
+//
+// Pulling home (target == self) is the mirror: it requires another device to
+// be the active player — with nothing playing anywhere there is nothing to
+// pull, and with ourselves active the service would bounce a transfer command
+// straight back at us, forcing a full reload of the very stream that is
+// playing.
+//
+// An unknown target is a lookup miss, not a bad request.
 func validateTransferTarget(cluster *connectpb.Cluster, selfId, target string, active bool) error {
 	if target == selfId {
-		return ErrBadRequest
+		if active || cluster.GetActiveDeviceId() == "" || cluster.GetActiveDeviceId() == selfId {
+			return ErrBadRequest
+		}
+		return nil
 	}
 	if !active {
 		return ErrBadRequest
@@ -102,9 +121,8 @@ func (p *AppPlayer) apiConnectTransfer(ctx context.Context, data ApiConnectTrans
 	ctx, cancel := context.WithTimeout(ctx, connectTransferTimeout)
 	defer cancel()
 
-	// We are the active device (validated above), so the session being moved
-	// is ours: from is always this device.
-	err := p.sess.Spclient().ConnectTransfer(ctx, p.app.deviceId, data.DeviceId, data.RestorePaused)
+	err := p.sess.Spclient().ConnectTransfer(ctx,
+		transferSource(p.state.lastCluster, p.app.deviceId, data.DeviceId), data.DeviceId, data.RestorePaused)
 
 	var rateLimited *spclient.RateLimitedError
 	if errors.As(err, &rateLimited) {

@@ -738,13 +738,14 @@ paths:
     post:
       operationId: connectTransfer
       description: >-
-        Move the current playback session to another device on the account,
-        via the internal connect-state API. The target must appear in
-        /connect/devices, must not be this device, and this device must be
-        the active player. A 200 means Spotify accepted the request; the
-        transfer completing is signalled by the usual inactive/stopped event
-        sequence, and a client should apply its own timeout for targets that
-        turn out to be offline.
+        Move a playback session between devices on the account, via the
+        internal connect-state API. Sending away (a target from
+        /connect/devices) requires this device to be the active player and
+        moves its session. Pulling home (device_id set to this device's own
+        id) requires another device to be the active player and moves that
+        session here. A 200 means Spotify accepted the request; completion is
+        signalled by the usual event sequences, and a client should apply its
+        own timeout for targets that turn out to be offline.
       requestBody:
         required: true
         content:
@@ -758,8 +759,9 @@ paths:
           description: No active session
         400:
           description: >-
-            The device_id is missing, is this device, or this device is not
-            the active player
+            The device_id is missing, or the transfer direction is impossible
+            (sending away while not the active player; pulling home while
+            already active or with nothing playing anywhere)
         404:
           description: The device is not present in the cluster
         429:

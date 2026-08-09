@@ -98,11 +98,16 @@ func TestClusterToApiDevicesNilCluster(t *testing.T) {
 	}
 }
 
-// The local rejections that must fire before any network call: self-transfer
-// (would bounce a transfer command back and reload the playing stream),
-// not-active (unverified from/to semantics upstream), unknown target.
+// The local rejections that must fire before any network call. Sending away
+// requires us active; pulling home requires someone else active; unknown
+// targets are lookup misses.
 func TestValidateTransferTarget(t *testing.T) {
 	cluster := testClusterFixture()
+
+	remoteActive := testClusterFixture()
+	remoteActive.ActiveDeviceId = "phone-id"
+	idleCluster := testClusterFixture()
+	idleCluster.ActiveDeviceId = ""
 
 	cases := []struct {
 		name    string
@@ -112,7 +117,10 @@ func TestValidateTransferTarget(t *testing.T) {
 		want    error
 	}{
 		{"valid target", cluster, "phone-id", true, nil},
-		{"self is rejected", cluster, "self-id", true, ErrBadRequest},
+		{"pull home while another device is active", remoteActive, "self-id", false, nil},
+		{"pull home while we are active is a bounce", cluster, "self-id", true, ErrBadRequest},
+		{"pull home with nothing active anywhere", idleCluster, "self-id", false, ErrBadRequest},
+		{"pull home with no cluster yet", nil, "self-id", false, ErrBadRequest},
 		{"not active is rejected", cluster, "phone-id", false, ErrBadRequest},
 		{"unknown device", cluster, "nope", true, ErrNotFound},
 		{"no cluster yet", nil, "phone-id", true, ErrNotFound},
@@ -159,5 +167,18 @@ func TestClusterUpdateIsStored(t *testing.T) {
 	}
 	if p.state.lastCluster.ActiveDeviceId != "self-id" {
 		t.Fatal("expected snapshot untouched by nil-cluster update")
+	}
+}
+
+// Sending away moves our session; pulling home moves the active device's.
+func TestTransferSource(t *testing.T) {
+	cluster := testClusterFixture()
+	cluster.ActiveDeviceId = "phone-id"
+
+	if got := transferSource(cluster, "self-id", "tv-id"); got != "self-id" {
+		t.Fatalf("expected self as source when sending away, got %s", got)
+	}
+	if got := transferSource(cluster, "self-id", "self-id"); got != "phone-id" {
+		t.Fatalf("expected the active device as source when pulling home, got %s", got)
 	}
 }
