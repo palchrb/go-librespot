@@ -198,9 +198,6 @@ func (c *Spclient) PutConnectStateInactive(ctx context.Context, spotConnId strin
 	}
 }
 
-// PutConnectState publishes the device state and returns the account's device
-// cluster from the response body when the service provides one (nil otherwise;
-// the cluster is a freshness bonus, never a requirement).
 // connectTransferBody builds the JSON body of a transfer command. The
 // transfer_options object mirrors the restore_paused option the daemon itself
 // receives on inbound transfers; empty restorePaused omits the options object
@@ -255,6 +252,9 @@ func (c *Spclient) ConnectTransfer(ctx context.Context, fromDeviceId, toDeviceId
 	return nil
 }
 
+// PutConnectState publishes the device state and returns the account's device
+// cluster from the response body when the service provides one (nil otherwise;
+// the cluster is a freshness bonus, never a requirement).
 func (c *Spclient) PutConnectState(ctx context.Context, spotConnId string, reqProto *connectpb.PutStateRequest) (*connectpb.Cluster, error) {
 	reqBody, err := proto.Marshal(reqProto)
 	if err != nil {
