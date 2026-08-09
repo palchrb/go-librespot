@@ -18,6 +18,15 @@ type State struct {
 	active      bool
 	activeSince time.Time
 
+	// lastCluster is the most recent device cluster seen, either as the body
+	// of a connect-state PUT or from a dealer ClusterUpdate. Run goroutine
+	// only; it lives on the session's State so it dies with the session and
+	// can never leak one account's device list into another's.
+	lastCluster *connectpb.Cluster
+	// lastClusterAt is when lastCluster was stored, exposed as updated_at so
+	// clients can judge freshness (cluster pushes only arrive on change).
+	lastClusterAt time.Time
+
 	device *connectpb.DeviceInfo
 	player *connectpb.PlayerState
 
@@ -177,6 +186,20 @@ func (p *AppPlayer) updateState(ctx context.Context) {
 	p.flushState(ctx)
 }
 
+// storeCluster remembers the newest device cluster. Ordering is enforced by
+// the cluster's own change timestamp, so a slow PUT response cannot overwrite
+// a fresher dealer update that arrived while it was in flight.
+func (s *State) storeCluster(cluster *connectpb.Cluster) {
+	if cluster == nil {
+		return
+	}
+	if s.lastCluster != nil && cluster.ChangedTimestampMs < s.lastCluster.ChangedTimestampMs {
+		return
+	}
+	s.lastCluster = cluster
+	s.lastClusterAt = time.Now()
+}
+
 func (p *AppPlayer) putConnectState(ctx context.Context, reason connectpb.PutStateReason) error {
 	if reason == connectpb.PutStateReason_BECAME_INACTIVE {
 		return p.sess.Spclient().PutConnectStateInactive(ctx, p.spotConnId, false)
@@ -206,8 +229,14 @@ func (p *AppPlayer) putConnectState(ctx context.Context, reason connectpb.PutSta
 		putStateReq.LastCommandSentByDeviceId = p.state.lastCommand.SentByDeviceId
 	}
 
-	// finally send the state update
-	return p.sess.Spclient().PutConnectState(ctx, p.spotConnId, putStateReq)
+	// finally send the state update; the response carries the device cluster,
+	// which seeds /connect/devices from the very first NEW_DEVICE put.
+	cluster, err := p.sess.Spclient().PutConnectState(ctx, p.spotConnId, putStateReq)
+	if err != nil {
+		return err
+	}
+	p.state.storeCluster(cluster)
+	return nil
 }
 
 // coverImageSizes maps the ProvidedTrack metadata keys Spotify's clients look

@@ -199,6 +199,11 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 			return fmt.Errorf("failed unmarshalling ClusterUpdate: %w", err)
 		}
 
+		if clusterUpdate.Cluster == nil {
+			return nil
+		}
+		p.state.storeCluster(clusterUpdate.Cluster)
+
 		stopBeingActive := p.state.active && clusterUpdate.Cluster.ActiveDeviceId != p.app.deviceId && clusterUpdate.Cluster.PlayerState.Timestamp > p.state.lastTransferTimestamp
 
 		// We are still the active device, do not quit

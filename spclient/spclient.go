@@ -194,12 +194,15 @@ func (c *Spclient) PutConnectStateInactive(ctx context.Context, spotConnId strin
 	}
 }
 
-func (c *Spclient) PutConnectState(ctx context.Context, spotConnId string, reqProto *connectpb.PutStateRequest) error {
+// PutConnectState publishes the device state and returns the account's device
+// cluster from the response body when the service provides one (nil otherwise;
+// the cluster is a freshness bonus, never a requirement).
+func (c *Spclient) PutConnectState(ctx context.Context, spotConnId string, reqProto *connectpb.PutStateRequest) (*connectpb.Cluster, error) {
 	reqBody, err := proto.Marshal(reqProto)
 	if err != nil {
-		return fmt.Errorf("failed marshalling PutStateRequest: %w", err)
+		return nil, fmt.Errorf("failed marshalling PutStateRequest: %w", err)
 	}
-	_, err = backoff.RetryWithData(func() (*http.Response, error) {
+	respBody, err := backoff.RetryWithData(func() ([]byte, error) {
 		resp, err := c.Request(
 			ctx,
 			"PUT",
@@ -237,13 +240,31 @@ func (c *Spclient) PutConnectState(ctx context.Context, spotConnId string, reqPr
 			return nil, reqErr
 		} else {
 			c.log.Debugf("put connect state because %s", reqProto.PutStateReason)
-			return resp, nil
+			body, _ := io.ReadAll(resp.Body)
+			return body, nil
 		}
 	}, backoff.WithContext(backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Second), 2), ctx))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return parseClusterResponse(c.log, respBody), nil
+}
+
+// parseClusterResponse decodes the connect-state PUT response body as a device
+// cluster. Best-effort by design: the body being the cluster is observed
+// behavior rather than a documented contract, so a format drift must never be
+// able to break state publishing — failures return nil.
+func parseClusterResponse(log librespot.Logger, body []byte) *connectpb.Cluster {
+	if len(body) == 0 {
+		return nil
+	}
+
+	var cluster connectpb.Cluster
+	if err := proto.Unmarshal(body, &cluster); err != nil {
+		log.WithError(err).Debugf("failed parsing connect state response as cluster")
+		return nil
+	}
+	return &cluster
 }
 
 // RateLimitedError reports a connect-state 429; RetryAfter is the advised cooldown.
