@@ -3,6 +3,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -15,6 +18,15 @@ func TestSkipDebounceMapping(t *testing.T) {
 
 	c.SkipDebounceMs = 0
 	require.Zero(t, c.toDaemonConfig().SkipDebounce)
+}
+
+func TestDefaultAudioBackend(t *testing.T) {
+	got := defaultAudioBackend()
+	if runtime.GOOS == "windows" {
+		require.Equal(t, "wasapi", got)
+		return
+	}
+	require.Equal(t, "alsa", got)
 }
 
 func TestParseSize(t *testing.T) {
@@ -50,4 +62,24 @@ func TestParseSize(t *testing.T) {
 			require.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func TestLoadCLIConfigWaitForReaderFlag(t *testing.T) {
+	dir := t.TempDir()
+
+	config := []byte("audio_backend: pipe\naudio_output_pipe: /tmp/fifo/go-spotify\naudio_output_pipe_wait_for_reader: true\n")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), config, 0o600))
+
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+	os.Args = []string{"test", "--config_dir", dir}
+
+	cfg := &cliConfig{}
+	require.NoError(t, loadCLIConfig(cfg))
+	t.Cleanup(func() {
+		if cfg.configLock != nil {
+			_ = cfg.configLock.Unlock()
+		}
+	})
+	require.True(t, cfg.AudioOutputPipeWaitForReader, "audio_output_pipe_wait_for_reader was not parsed from the config file")
 }

@@ -93,7 +93,7 @@ func New(opts *Options) (*App, error) {
 		app.state = &librespot.AppState{}
 	}
 
-	app.resolver = apresolve.NewApResolver(app.log, app.client)
+	app.resolver = apresolve.NewApResolver(app.log, app.client, app.cfg.PreferFirewallFriendlyPorts)
 
 	if app.cfg.DeviceId != "" {
 		app.deviceId = app.cfg.DeviceId
@@ -171,6 +171,8 @@ func (app *App) Run(ctx context.Context) error {
 		return app.runZeroconf(ctx)
 	case "interactive":
 		return app.runInteractive(ctx, app.cfg.Credentials.Interactive.CallbackPort)
+	case "device_auth":
+		return app.runDeviceAuth(ctx)
 	case "spotify_token":
 		return app.runSpotifyToken(ctx, app.cfg.Credentials.SpotifyToken.Username, app.cfg.Credentials.SpotifyToken.AccessToken)
 	default:
@@ -211,8 +213,12 @@ func (app *App) persistState() error {
 }
 
 func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err error) {
+	playerCtx, playerCancel := context.WithCancel(ctx)
+
 	appPlayer := &AppPlayer{
 		app:             app,
+		ctx:             playerCtx,
+		cancel:          playerCancel,
 		stop:            make(chan struct{}, 1),
 		logout:          app.logoutCh,
 		countryCode:     new(string),
@@ -220,11 +226,20 @@ func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err 
 		playbackReadyCh: make(chan struct{}),
 	}
 
+	defer func() {
+		if err != nil {
+			playerCancel()
+		}
+	}()
+
 	appPlayer.prefetchTimer = time.NewTimer(math.MaxInt64)
 	appPlayer.prefetchTimer.Stop()
 
 	appPlayer.settleTimer = time.NewTimer(math.MaxInt64)
 	appPlayer.settleTimer.Stop()
+
+	appPlayer.sleepTimer = time.NewTimer(math.MaxInt64)
+	appPlayer.sleepTimer.Stop()
 
 	appPlayer.metaCache = newTrackMetaCache()
 	appPlayer.contextLists = newContextListCache()
@@ -274,8 +289,9 @@ func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err 
 		ExternalVolume: app.cfg.ExternalVolume,
 		VolumeUpdate:   appPlayer.volumeUpdate,
 
-		AudioOutputPipe:       app.cfg.AudioOutputPipe,
-		AudioOutputPipeFormat: app.cfg.AudioOutputPipeFormat,
+		AudioOutputPipe:              app.cfg.AudioOutputPipe,
+		AudioOutputPipeFormat:        app.cfg.AudioOutputPipeFormat,
+		AudioOutputPipeWaitForReader: app.cfg.AudioOutputPipeWaitForReader,
 	},
 	); err != nil {
 		return nil, fmt.Errorf("failed initializing player: %w", err)
@@ -305,6 +321,10 @@ func (app *App) runSpotifyToken(ctx context.Context, username, token string) err
 
 func (app *App) runInteractive(ctx context.Context, callbackPort int) error {
 	return app.withCredentials(ctx, session.InteractiveCredentials{CallbackPort: callbackPort})
+}
+
+func (app *App) runDeviceAuth(ctx context.Context) error {
+	return app.withCredentials(ctx, session.DeviceAuthCredentials{})
 }
 
 func (app *App) withCredentials(ctx context.Context, creds any) (err error) {
@@ -374,7 +394,7 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 			panic("zeroconf is disabled and no credentials are present")
 		}
 
-		appPlayer.Run(ctx, app.server.Receive(), app.mpris.Receive())
+		appPlayer.Run(app.server.Receive(), app.mpris.Receive())
 		return nil
 	}
 
@@ -423,7 +443,7 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 
 		if next != nil {
 			go func() {
-				next.player.Run(ctx, next.apiCh, app.mpris.Receive())
+				next.player.Run(next.apiCh, app.mpris.Receive())
 
 				// Run stopped by itself (it gives up when the dealer is
 				// unreachable): nothing will read apiCh again, so release any

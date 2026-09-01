@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,7 +60,6 @@ type ApiRequestType string
 
 const (
 	ApiRequestTypeRoot                ApiRequestType = "root"
-	ApiRequestTypeWebApi              ApiRequestType = "web_api"
 	ApiRequestTypeStatus              ApiRequestType = "status"
 	ApiRequestTypeResume              ApiRequestType = "resume"
 	ApiRequestTypePause               ApiRequestType = "pause"
@@ -136,8 +134,6 @@ func NewApiRequest(t ApiRequestType, data any) (req ApiRequest, wait func(contex
 // The request and response payloads are generated from api-spec.yml.
 // Only the payloads the spec cannot describe are declared here.
 
-// ApiRequestDataWebApi is not in the spec: /web-api/ is a catch-all proxy
-// whose path continues for any number of segments, so it is routed by hand.
 // ApiRequestDataContextTracks, ApiRequestDataCacheDownload and
 // ApiRequestDataCacheSnapshot carry query/body parameters into the request
 // channel; their wire shapes are the generated models.
@@ -151,12 +147,6 @@ type ApiRequestDataCacheDownload struct {
 
 type ApiRequestDataCacheSnapshot struct {
 	Uri string `json:"uri"`
-}
-
-type ApiRequestDataWebApi struct {
-	Method string
-	Path   string
-	Query  url.Values
 }
 
 type apiResponse struct {
@@ -636,20 +626,6 @@ func (s *ConcreteApiServer) PlayerOutput(w http.ResponseWriter, r *http.Request)
 	s.handleRequest(ApiRequest{Type: ApiRequestTypeReopenOutput, Data: data.Device}, w)
 }
 
-// handleWebApi proxies anything under /web-api/ to the Spotify Web API. It is
-// registered by hand rather than generated: the path continues for an
-// arbitrary number of segments, which an OpenAPI path template cannot express.
-func (s *ConcreteApiServer) handleWebApi(w http.ResponseWriter, r *http.Request) {
-	s.handleRequest(ApiRequest{
-		Type: ApiRequestTypeWebApi,
-		Data: ApiRequestDataWebApi{
-			Method: r.Method,
-			Path:   strings.TrimPrefix(r.URL.Path, "/web-api/"),
-			Query:  r.URL.Query(),
-		},
-	}, w)
-}
-
 func (s *ConcreteApiServer) GetEvents(w http.ResponseWriter, r *http.Request) {
 	opts := &websocket.AcceptOptions{}
 	if len(s.allowOrigin) > 0 {
@@ -697,9 +673,6 @@ func (s *ConcreteApiServer) GetEvents(w http.ResponseWriter, r *http.Request) {
 
 func (s *ConcreteApiServer) serve() {
 	m := http.NewServeMux()
-
-	// Routing comes from the spec; only the catch-all proxy is added by hand.
-	m.HandleFunc("/web-api/", s.handleWebApi)
 	handler := HandlerFromMux(s, m)
 
 	c := cors.New(cors.Options{
