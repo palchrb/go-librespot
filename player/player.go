@@ -2,6 +2,7 @@ package player
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -35,6 +36,8 @@ const MaxStateVolume = 65535
 
 const CdnUrlQuarantineDuration = 15 * time.Minute
 
+var ErrPlayerClosed = errors.New("player is closed")
+
 func ptr[T any](v T) *T {
 	return &v
 }
@@ -64,8 +67,9 @@ type Player struct {
 	// ReopenOutput.
 	defaultAudioDevice string
 
-	cmd chan playerCmd
-	ev  chan Event
+	cmd    chan playerCmd
+	ev     chan Event
+	closed chan struct{}
 
 	volumeSteps uint32
 
@@ -179,6 +183,14 @@ type Options struct {
 	//
 	// This is only supported on the pipe backend.
 	AudioOutputPipeFormat string
+
+	// AudioOutputPipeWaitForReader makes the pipe backend wait for a reader to
+	// appear when opening the FIFO, instead of failing if none is present at the
+	// time playback starts. This is useful for readers (e.g. snapcast with
+	// dryout) that only connect to the FIFO when data is expected.
+	//
+	// This is only supported on the pipe backend.
+	AudioOutputPipeWaitForReader bool
 }
 
 func NewPlayer(opts *Options) (*Player, error) {
@@ -198,27 +210,29 @@ func NewPlayer(opts *Options) (*Player, error) {
 		defaultAudioDevice:        opts.AudioDevice,
 		newOutput: func(reader librespot.Float32Reader, volume float32, device string) (output.Output, error) {
 			return output.NewOutput(&output.NewOutputOptions{
-				Log:              opts.Log,
-				Backend:          opts.AudioBackend,
-				Reader:           reader,
-				SampleRate:       SampleRate,
-				ChannelCount:     Channels,
-				Device:           device,
-				RuntimeSocket:    opts.AudioBackendRuntimeSocket,
-				Mixer:            opts.MixerDevice,
-				Control:          opts.MixerControlName,
-				InitialVolume:    volume,
-				BufferTimeMicro:  opts.AudioBufferTime,
-				PeriodCount:      opts.AudioPeriodCount,
-				ExternalVolume:   opts.ExternalVolume,
-				VolumeUpdate:     opts.VolumeUpdate,
-				OutputPipe:       opts.AudioOutputPipe,
-				OutputPipeFormat: opts.AudioOutputPipeFormat,
+				Log:                     opts.Log,
+				Backend:                 opts.AudioBackend,
+				Reader:                  reader,
+				SampleRate:              SampleRate,
+				ChannelCount:            Channels,
+				Device:                  device,
+				RuntimeSocket:           opts.AudioBackendRuntimeSocket,
+				Mixer:                   opts.MixerDevice,
+				Control:                 opts.MixerControlName,
+				InitialVolume:           volume,
+				BufferTimeMicro:         opts.AudioBufferTime,
+				PeriodCount:             opts.AudioPeriodCount,
+				ExternalVolume:          opts.ExternalVolume,
+				VolumeUpdate:            opts.VolumeUpdate,
+				OutputPipe:              opts.AudioOutputPipe,
+				OutputPipeFormat:        opts.AudioOutputPipeFormat,
+				OutputPipeWaitForReader: opts.AudioOutputPipeWaitForReader,
 			})
 		},
 
-		cmd: make(chan playerCmd),
-		ev:  make(chan Event, 128),
+		cmd:    make(chan playerCmd),
+		ev:     make(chan Event, 128),
+		closed: make(chan struct{}),
 	}
 
 	go p.manageLoop()
@@ -444,7 +458,7 @@ loop:
 		}
 	}
 
-	close(p.cmd)
+	close(p.closed)
 
 	_ = source.Close()
 
@@ -466,18 +480,35 @@ func (p *Player) Receive() <-chan Event {
 	return p.ev
 }
 
+// send hands cmd to manageLoop, reporting false if the player has already been
+// closed and the command was therefore not delivered. Once the send succeeds
+// manageLoop always answers cmd.resp before it can exit, so callers may wait on
+// the response unconditionally.
+func (p *Player) send(cmd playerCmd) bool {
+	select {
+	case p.cmd <- cmd:
+		return true
+	case <-p.closed:
+		return false
+	}
+}
+
+// Close stops the player. It is safe to call more than once and safe to call
+// while other goroutines are issuing commands: those get ErrPlayerClosed.
 func (p *Player) Close() {
-	p.cmd <- playerCmd{typ: playerCmdClose}
+	p.send(playerCmd{typ: playerCmdClose})
 }
 
 func (p *Player) SetVolume(val uint32) {
 	vol := float32(val) / MaxStateVolume
-	p.cmd <- playerCmd{typ: playerCmdVolume, data: vol}
+	p.send(playerCmd{typ: playerCmdVolume, data: vol})
 }
 
 func (p *Player) Play() error {
 	resp := make(chan any, 1)
-	p.cmd <- playerCmd{typ: playerCmdPlay, resp: resp}
+	if !p.send(playerCmd{typ: playerCmdPlay, resp: resp}) {
+		return ErrPlayerClosed
+	}
 	if err := <-resp; err != nil {
 		return err.(error)
 	}
@@ -487,7 +518,9 @@ func (p *Player) Play() error {
 
 func (p *Player) Pause() error {
 	resp := make(chan any, 1)
-	p.cmd <- playerCmd{typ: playerCmdPause, resp: resp}
+	if !p.send(playerCmd{typ: playerCmdPause, resp: resp}) {
+		return ErrPlayerClosed
+	}
 	if err := <-resp; err != nil {
 		return err.(error)
 	}
@@ -497,13 +530,17 @@ func (p *Player) Pause() error {
 
 func (p *Player) Stop() {
 	resp := make(chan any, 1)
-	p.cmd <- playerCmd{typ: playerCmdStop, resp: resp}
+	if !p.send(playerCmd{typ: playerCmdStop, resp: resp}) {
+		return
+	}
 	<-resp
 }
 
 func (p *Player) SeekMs(pos int64) error {
 	resp := make(chan any, 1)
-	p.cmd <- playerCmd{typ: playerCmdSeek, data: pos, resp: resp}
+	if !p.send(playerCmd{typ: playerCmdSeek, data: pos, resp: resp}) {
+		return ErrPlayerClosed
+	}
 	if err := <-resp; err != nil {
 		return err.(error)
 	}
@@ -511,9 +548,13 @@ func (p *Player) SeekMs(pos int64) error {
 	return nil
 }
 
+// PositionMs returns the current playback position, or zero if the player has
+// been closed.
 func (p *Player) PositionMs() int64 {
 	resp := make(chan any, 1)
-	p.cmd <- playerCmd{typ: playerCmdPosition, resp: resp}
+	if !p.send(playerCmd{typ: playerCmdPosition, resp: resp}) {
+		return 0
+	}
 	pos := <-resp
 	return pos.(int64)
 }
@@ -526,7 +567,9 @@ func (p *Player) PositionMs() int64 {
 // which case playback is left stopped.
 func (p *Player) ReopenOutput(device string) error {
 	resp := make(chan any, 1)
-	p.cmd <- playerCmd{typ: playerCmdReopenOutput, data: device, resp: resp}
+	if !p.send(playerCmd{typ: playerCmdReopenOutput, data: device, resp: resp}) {
+		return ErrPlayerClosed
+	}
 	if err := <-resp; err != nil {
 		return err.(error)
 	}
@@ -536,7 +579,9 @@ func (p *Player) ReopenOutput(device string) error {
 
 func (p *Player) SetPrimaryStream(source librespot.AudioSource, paused, drop bool) error {
 	resp := make(chan any)
-	p.cmd <- playerCmd{typ: playerCmdSet, data: playerCmdDataSet{source: source, primary: true, paused: paused, drop: drop}, resp: resp}
+	if !p.send(playerCmd{typ: playerCmdSet, data: playerCmdDataSet{source: source, primary: true, paused: paused, drop: drop}, resp: resp}) {
+		return ErrPlayerClosed
+	}
 	if err := <-resp; err != nil {
 		return err.(error)
 	}
@@ -546,7 +591,9 @@ func (p *Player) SetPrimaryStream(source librespot.AudioSource, paused, drop boo
 
 func (p *Player) SetSecondaryStream(source librespot.AudioSource) {
 	resp := make(chan any)
-	p.cmd <- playerCmd{typ: playerCmdSet, data: playerCmdDataSet{source: source, primary: false}, resp: resp}
+	if !p.send(playerCmd{typ: playerCmdSet, data: playerCmdDataSet{source: source, primary: false}, resp: resp}) {
+		return
+	}
 	<-resp
 }
 
@@ -627,15 +674,22 @@ func (p *Player) retrieveAudioKey(ctx context.Context, spotId librespot.SpotifyI
 const spotifyLoudnessTarget = -14.0
 
 func calculateNormalisationFactor(params *audiofilespb.NormalizationParams, pregain float32) float32 {
+	return normalisationFactorFor(params.LoudnessDb, params.TruePeakDb, pregain)
+}
+
+// normalisationFactorFor is the same calculation for audio that carries its
+// loudness outside NormalizationParams, as DJ narration does in its
+// narration.*.loudness and narration.*.true_peak metadata.
+func normalisationFactorFor(loudnessDb, truePeakDb, pregain float32) float32 {
 	// LoudnessDb is the integrated loudness of the track in LUFS (ITU-R BS.1770)
 	// To normalize, calculate the gain needed to reach Spotify's target of -14 LUFS
-	gainDb := spotifyLoudnessTarget - params.LoudnessDb + pregain
+	gainDb := spotifyLoudnessTarget - loudnessDb + pregain
 
 	// Convert gain from dB to linear scale
 	normalisationFactor := float32(math.Pow(10, float64(gainDb/20)))
 
 	// TruePeakDb from audio files response is in dBTP (dB True Peak)
-	truePeakLinear := float32(math.Pow(10, float64(params.TruePeakDb)/20))
+	truePeakLinear := float32(math.Pow(10, float64(truePeakDb)/20))
 	if truePeakLinear <= 0 {
 		return normalisationFactor
 	}
@@ -721,16 +775,17 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 		}
 
 		if p.normalisationEnabled {
+			var params *audiofilespb.NormalizationParams
 			if p.normalisationUseAlbumGain {
-				normalisationFactor = calculateNormalisationFactor(
-					audioFilesResp.DefaultAlbumNormalizationParams,
-					p.normalisationPregain,
-				)
+				params = audioFilesResp.DefaultAlbumNormalizationParams
 			} else {
-				normalisationFactor = calculateNormalisationFactor(
-					audioFilesResp.DefaultFileNormalizationParams,
-					p.normalisationPregain,
-				)
+				params = audioFilesResp.DefaultFileNormalizationParams
+			}
+
+			if params != nil {
+				normalisationFactor = calculateNormalisationFactor(params, p.normalisationPregain)
+			} else {
+				normalisationFactor = 1
 			}
 		} else {
 			normalisationFactor = 1

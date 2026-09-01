@@ -9,15 +9,16 @@ type Config struct {
 	DeviceType  string
 	ClientToken string
 
-	AudioBackend              string
-	AudioBackendRuntimeSocket string
-	AudioDevice               string
-	MixerDevice               string
-	MixerControlName          string
-	AudioBufferTime           int
-	AudioPeriodCount          int
-	AudioOutputPipe           string
-	AudioOutputPipeFormat     string
+	AudioBackend                 string
+	AudioBackendRuntimeSocket    string
+	AudioDevice                  string
+	MixerDevice                  string
+	MixerControlName             string
+	AudioBufferTime              int
+	AudioPeriodCount             int
+	AudioOutputPipe              string
+	AudioOutputPipeFormat        string
+	AudioOutputPipeWaitForReader bool
 
 	Bitrate                   int
 	VolumeSteps               uint32
@@ -42,6 +43,10 @@ type Config struct {
 	ZeroconfInterfacesToAdvertise []string
 
 	FlacEnabled bool
+
+	// PreferFirewallFriendlyPorts tries accesspoints on 443 and 80 before the
+	// default 4070, which some networks block outbound.
+	PreferFirewallFriendlyPorts bool
 
 	// ImageSize selects which cover-art image variant the API server returns:
 	// "default", "small", "medium", "large", "xlarge".

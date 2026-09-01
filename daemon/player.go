@@ -6,11 +6,9 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"strconv"
 	"strings"
@@ -35,6 +33,9 @@ import (
 type AppPlayer struct {
 	app  *App
 	sess *session.Session
+
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	stop      chan struct{}
 	closeOnce sync.Once
@@ -64,6 +65,14 @@ type AppPlayer struct {
 	primaryStream   *player.Stream
 	secondaryStream *player.Stream
 
+	// secondarySource is what the player was handed as the secondary.
+	secondarySource librespot.AudioSource
+
+	// narrationJumped records that the upcoming track is being reached by
+	// jumping straight to it, so a DJ context introduces it with its jump line
+	// rather than the one for arriving in sequence. Consumed by the next load.
+	narrationJumped bool
+
 	// resumeFinishedPlaybackId is the playback id of the stream most recently
 	// reported as listened to the end, so that unloading it cannot overwrite
 	// that with a position a moment short of the end.
@@ -87,6 +96,20 @@ type AppPlayer struct {
 	// keyRetries counts consecutive deferred retries for a throttled audio key on the
 	// current pointer track. Reset on any user skip or successful load.
 	keyRetries int
+
+	// sleepTimer fires the duration requested by the most recent
+	// set_sleep_timer command, pausing playback. Stopped/reset (never left
+	// to fire) by a later set_sleep_timer call, matching the "only one timer
+	// active at a time" behavior of Spotify's own clients.
+	sleepTimer *time.Timer
+
+	// sleepAtEndOfTrack is set by a set_sleep_timer command whose timer_type
+	// is "end_of_track": rather than a duration to wait, playback is meant
+	// to stop when the current track naturally finishes. Checked (and
+	// cleared) in the EventTypeNotPlaying handler, in place of the usual
+	// advance to the next track. Mutually exclusive with sleepTimer - only
+	// one sleep timer mode is active at a time.
+	sleepAtEndOfTrack bool
 
 	// consecutiveUnplayableSkips bounds how many unplayable tracks in a row advanceNext will
 	// skip past (Spotify-refused audio keys / restricted media) before giving up — so a run
@@ -282,17 +305,19 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 		p.state.player.ContextRestrictions = transferState.CurrentSession.Context.Restrictions
 		p.state.player.Suppressions = transferState.CurrentSession.Suppressions
 
-		p.state.player.ContextMetadata = map[string]string{}
-		for k, v := range transferState.CurrentSession.Context.Metadata {
-			p.state.player.ContextMetadata[k] = v
-		}
-		for k, v := range ctxTracks.Metadata() {
-			p.state.player.ContextMetadata[k] = v
-		}
+		p.state.player.ContextMetadata = contextMetadata(transferState.CurrentSession.Context.Metadata, ctxTracks.Metadata())
 
+		// Claim the transfer before doing anything slow.
 		contextSpotType := librespot.InferSpotifyIdTypeFromContextUri(p.state.player.ContextUri)
-		currentTrack := librespot.ContextTrackToProvidedTrack(contextSpotType, transferState.Playback.CurrentTrack)
-		if err := ctxTracks.TrySeek(ctx, tracks.ProvidedTrackComparator(contextSpotType, currentTrack)); err != nil {
+		p.state.player.Track = librespot.ContextTrackToProvidedTrack(contextSpotType, transferState.Playback.CurrentTrack)
+		p.state.player.IsPlaying = true
+		p.state.player.IsBuffering = true
+		p.state.player.PlaybackSpeed = 0 // not progressing while buffering
+		p.flushState(ctx)
+
+		// Seek to the transferred track, playing it ahead of the context if it
+		// cannot be located.
+		if err := ctxTracks.TrySeekTo(ctx, transferState.Playback.CurrentTrack); err != nil {
 			return fmt.Errorf("failed seeking to track: %w", err)
 		}
 
@@ -451,7 +476,56 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 	case "add_to_queue":
 		p.addToQueue(ctx, req.Command.Track)
 		return nil
+	case "set_sleep_timer":
+		// Only one timer (of either mode) is active at a time: stop/drain
+		// the duration timer and clear the end-of-track flag before
+		// possibly setting either, matching Spotify's own clients (a new
+		// call replaces, not stacks with, an earlier one, of either mode).
+		if !p.sleepTimer.Stop() {
+			select {
+			case <-p.sleepTimer.C:
+			default:
+			}
+		}
+		p.sleepAtEndOfTrack = false
+
+		// Setting the timer alone has no visible effect on its own: the
+		// Spotify app doesn't track this locally, it reads back whether (and
+		// when) a timer is active from PlayerState.SleepTimer, so that has
+		// to be kept in sync for the app to show anything at all.
+		tt := req.Command.TimerType
+		switch {
+		case tt != nil && tt.Type == "duration" && tt.DurationS > 0:
+			duration := time.Duration(tt.DurationS) * time.Second
+			p.sleepTimer.Reset(duration)
+			p.state.player.SleepTimer = &connectpb.SleepTimer{
+				TimerType: &connectpb.SleepTimer_Timestamp_{
+					Timestamp: &connectpb.SleepTimer_Timestamp{
+						Timestamp: time.Now().Add(duration).UnixMilli(),
+					},
+				},
+			}
+		case tt != nil && tt.Type == "end_of_track":
+			p.sleepAtEndOfTrack = true
+			p.state.player.SleepTimer = &connectpb.SleepTimer{
+				TimerType: &connectpb.SleepTimer_EndOfTrack_{
+					EndOfTrack: &connectpb.SleepTimer_EndOfTrack{},
+				},
+			}
+		default:
+			// "clear" is Spotify's own cancel signal. Anything else we don't
+			// recognize is logged rather than silently treated as a cancel,
+			// so its actual wire shape can be captured.
+			if tt != nil && tt.Type != "" && tt.Type != "clear" {
+				p.app.log.Warnf("unsupported set_sleep_timer timer_type payload: %s", req.RawCommand)
+			}
+			p.state.player.SleepTimer = nil
+		}
+
+		p.updateState(ctx)
+		return nil
 	default:
+		p.app.log.Warnf("unsupported player command %q payload: %s", req.Command.Endpoint, req.RawCommand)
 		return fmt.Errorf("unsupported player command: %s", req.Command.Endpoint)
 	}
 }
@@ -478,46 +552,6 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 	switch req.Type {
 	case ApiRequestTypeRoot:
 		return &ApiRoot{PlaybackReady: p.playbackReady()}, nil
-	case ApiRequestTypeWebApi:
-		data := req.Data.(ApiRequestDataWebApi)
-		resp, err := p.sess.WebApi(ctx, data.Method, data.Path, data.Query, nil, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to send web api request: %w", err)
-		}
-
-		defer func() { _ = resp.Body.Close() }()
-
-		// this is the status we want to return to client not just 500
-		switch resp.StatusCode {
-		case 400:
-			return nil, ErrBadRequest
-		case 403:
-			return nil, ErrForbidden
-		case 404:
-			return nil, ErrNotFound
-		case 405:
-			return nil, ErrMethodNotAllowed
-		case 429:
-			return nil, ErrTooManyRequests
-		}
-
-		// check for content type if not application/json
-		if !strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
-			respBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read response body: %w", err)
-			}
-
-			return respBody, nil
-		}
-
-		// decode and return json
-		var respJson any
-		if err = json.NewDecoder(resp.Body).Decode(&respJson); err != nil {
-			return nil, fmt.Errorf("failed to decode response body: %w", err)
-		}
-
-		return respJson, nil
 	case ApiRequestTypeStatus:
 		resp := &ApiStatus{
 			Username:       p.sess.Username(),
@@ -862,17 +896,20 @@ func (p *AppPlayer) handleMprisEvent(ctx context.Context, req mpris.MediaPlayer2
 	return nil
 }
 
-// Close stops the player and releases its session.
+// Close stops the player and releases its session. It may be called while Run
+// is still busy serving a command, so it must not assume Run reacts promptly:
+// cancelling the context is what actually unblocks in-flight requests.
 func (p *AppPlayer) Close() {
 	p.closeOnce.Do(func() {
+		p.cancel()
 		p.stop <- struct{}{}
 		p.player.Close()
 		p.sess.Close()
 	})
 }
 
-func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRecv <-chan mpris.MediaPlayer2PlayerCommand) {
-	err := p.sess.Dealer().Connect(ctx)
+func (p *AppPlayer) Run(apiRecv <-chan ApiRequest, mprisRecv <-chan mpris.MediaPlayer2PlayerCommand) {
+	err := p.sess.Dealer().Connect(p.ctx)
 	if err != nil {
 		p.app.log.WithError(err).Error("failed connecting to dealer")
 		p.Close()
@@ -938,7 +975,7 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 				continue
 			}
 
-			if err := p.handleDealerMessage(ctx, msg); err != nil {
+			if err := p.handleDealerMessage(p.ctx, msg); err != nil {
 				p.app.log.WithError(err).Warn("failed handling dealer message")
 			}
 		case req, ok := <-reqRecv:
@@ -950,7 +987,7 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 				continue
 			}
 
-			if err := p.handleDealerRequest(ctx, req); err != nil {
+			if err := p.handleDealerRequest(p.ctx, req); err != nil {
 				p.app.log.WithError(err).Warn("failed handling dealer request")
 				req.Reply(false)
 			} else {
@@ -963,7 +1000,7 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 				continue
 			}
 
-			data, err := p.handleApiRequest(ctx, req)
+			data, err := p.handleApiRequest(p.ctx, req)
 			req.Reply(data, err)
 		case mprisReq, ok := <-mprisRecv:
 			if !ok {
@@ -972,7 +1009,7 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 			}
 
 			p.app.log.Tracef("new mpris message %v", mprisReq)
-			err := p.handleMprisEvent(ctx, mprisReq)
+			err := p.handleMprisEvent(p.ctx, mprisReq)
 			dbusError := mpris.MediaPlayer2PlayerCommandResponse{
 				Err: &dbus.Error{},
 			}
@@ -988,9 +1025,9 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 				continue
 			}
 
-			p.handlePlayerEvent(ctx, &ev)
+			p.handlePlayerEvent(p.ctx, &ev)
 		case <-p.prefetchTimer.C:
-			p.prefetchNext(ctx)
+			p.prefetchNext(p.ctx)
 		case <-p.settleTimer.C:
 			// e.g. cancelled between Reset and fire
 			if !p.settlePending {
@@ -999,7 +1036,7 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 
 			// Limit ourselves to 30 seconds like every other load path: a
 			// hanging network call here would block the whole control loop.
-			settleCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			settleCtx, cancel := context.WithTimeout(p.ctx, 30*time.Second)
 			if err := p.settleNow(settleCtx); err != nil {
 				p.app.log.WithError(err).Error("failed loading settled track")
 
@@ -1018,6 +1055,14 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 				}
 			}
 			cancel()
+		case <-p.sleepTimer.C:
+			// Cleared before pause(), whose own updateState call picks this
+			// up - so the app stops showing the timer as active in the same
+			// state push that reports playback paused.
+			p.state.player.SleepTimer = nil
+			if err := p.pause(p.ctx); err != nil {
+				p.app.log.WithError(err).Warn("failed pausing playback for sleep timer")
+			}
 		case volume := <-p.volumeUpdate:
 			// Received a new volume: from Spotify Connect, from the REST API,
 			// or from the system volume mixer.
@@ -1028,13 +1073,13 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 			volumeTimer.Reset(100 * time.Millisecond)
 		case <-volumeTimer.C:
 			// We've gone some time without update, send the new value now.
-			p.volumeUpdated(ctx)
+			p.volumeUpdated(p.ctx)
 		case <-p.stateTimer.C:
 			p.statePutScheduled = false
 			if !p.stateDirty {
 				break
 			}
-			p.flushState(ctx)
+			p.flushState(p.ctx)
 		}
 	}
 }
