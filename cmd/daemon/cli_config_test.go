@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -18,6 +19,15 @@ func TestDefaultAudioBackend(t *testing.T) {
 		return
 	}
 	require.Equal(t, "alsa", got)
+}
+
+func TestSkipDebounceMapping(t *testing.T) {
+	var c cliConfig
+	c.SkipDebounceMs = 400
+	require.Equal(t, 400*time.Millisecond, c.toDaemonConfig().SkipDebounce)
+
+	c.SkipDebounceMs = 0
+	require.Zero(t, c.toDaemonConfig().SkipDebounce)
 }
 
 func TestParseSize(t *testing.T) {
