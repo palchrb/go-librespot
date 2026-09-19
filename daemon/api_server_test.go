@@ -147,6 +147,7 @@ var endpointMethods = map[string][]string{
 	"/player/output":          {http.MethodPost},
 	"/context/tracks":         {http.MethodGet},
 	"/cache/download":         {http.MethodPost},
+	"/cache/snapshot":         {http.MethodGet},
 }
 
 func TestApiRejectsWrongMethod(t *testing.T) {
@@ -623,6 +624,33 @@ func TestApiCacheDownload(t *testing.T) {
 		resp := ts.do(http.MethodPost, "/cache/download", map[string]any{})
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 		ts.requireNoRequest()
+	})
+}
+
+// Clients compare the snapshot id they stored against this one, so both fields
+// must be present even when there is nothing to report.
+func TestApiCacheSnapshotWireFormat(t *testing.T) {
+	t.Run("forwards the uri and reports a revision", func(t *testing.T) {
+		snapshotId, length := "abcd", 12
+		ts := newTestServer(t, func(ApiRequest) (any, error) {
+			return &ApiCacheSnapshot{SnapshotId: &snapshotId, Length: &length}, nil
+		})
+
+		resp := ts.do(http.MethodGet, "/cache/snapshot?uri=spotify:playlist:a", nil)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.JSONEq(t, `{"snapshot_id":"abcd","length":12}`, body(t, resp))
+
+		req := ts.request()
+		require.Equal(t, ApiRequestTypeCacheSnapshot, req.Type)
+		require.Equal(t, ApiRequestDataCacheSnapshot{Uri: "spotify:playlist:a"}, req.Data)
+	})
+
+	t.Run("serialises a missing snapshot as null", func(t *testing.T) {
+		ts := newTestServer(t, func(ApiRequest) (any, error) { return &ApiCacheSnapshot{}, nil })
+
+		resp := ts.do(http.MethodGet, "/cache/snapshot?uri=spotify:album:a", nil)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.JSONEq(t, `{"snapshot_id":null,"length":null}`, body(t, resp))
 	})
 }
 

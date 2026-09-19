@@ -255,6 +255,20 @@ components:
             Spotify URI of the context (playlist, album, artist, track or
             episode) to download into the cache
           type: string
+    cacheSnapshot:
+      x-go-name: ApiCacheSnapshot
+      description: A playlist's current revision and track count
+      type: object
+      required: [ snapshot_id, length ]
+      properties:
+        snapshot_id:
+          description: The playlist snapshot id, or null for non-playlists
+          type: string
+          nullable: true
+        length:
+          description: Number of tracks in the playlist, when available
+          type: integer
+          nullable: true
     root:
       x-go-name: ApiRoot
       description: API reachability and playback readiness
@@ -567,6 +581,30 @@ paths:
       responses:
         200:
           description: Successful response
+  /cache/snapshot:
+    get:
+      operationId: getCacheSnapshot
+      description: >-
+        Return the current snapshot id (playlist revision) and track count for
+        a playlist URI, so clients can decide whether a playlist changed and
+        needs re-caching. Only playlists have a snapshot; for any other URI
+        the snapshot_id is null.
+      parameters:
+        - name: uri
+          in: query
+          required: true
+          description: Spotify playlist URI
+          schema:
+            type: string
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/cacheSnapshot'
+        400:
+          description: The uri is not a valid Spotify URI
   /player/play:
     post:
       operationId: playerPlay

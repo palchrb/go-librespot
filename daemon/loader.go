@@ -160,6 +160,10 @@ func (p *AppPlayer) goDetached(timeout time.Duration, fn func(ctx context.Contex
 // tokenTimeout bounds an access token renewal made on behalf of an API caller.
 const tokenTimeout = 30 * time.Second
 
+// playlistSnapshotTimeout bounds a playlist revision lookup made on behalf of
+// an API caller.
+const playlistSnapshotTimeout = 30 * time.Second
+
 // maxPendingPlayerEvents bounds how many player events are held while a load is
 // outstanding, so a load that never lands cannot grow the buffer without limit.
 const maxPendingPlayerEvents = 32

@@ -129,11 +129,18 @@ const (
 	ApiRequestTypeReopenOutput        ApiRequestType = "reopen_output"
 	ApiRequestTypeContextTracks       ApiRequestType = "context_tracks"
 	ApiRequestTypeCacheDownload       ApiRequestType = "cache_download"
+	ApiRequestTypeCacheSnapshot       ApiRequestType = "cache_snapshot"
 )
 
 // ApiRequestDataContextTracks carries the uri query parameter of the context
 // listing request; the spec generates payloads only for request bodies.
 type ApiRequestDataContextTracks struct {
+	Uri string
+}
+
+// ApiRequestDataCacheSnapshot carries the uri query parameter of the snapshot
+// request, for the same reason.
+type ApiRequestDataCacheSnapshot struct {
 	Uri string
 }
 
@@ -502,6 +509,10 @@ func (s *ConcreteApiServer) CacheDownload(w http.ResponseWriter, r *http.Request
 	}
 
 	s.handleRequest(ApiRequest{Type: ApiRequestTypeCacheDownload, Data: data}, w)
+}
+
+func (s *ConcreteApiServer) GetCacheSnapshot(w http.ResponseWriter, _ *http.Request, params GetCacheSnapshotParams) {
+	s.handleRequest(ApiRequest{Type: ApiRequestTypeCacheSnapshot, Data: ApiRequestDataCacheSnapshot{Uri: params.Uri}}, w)
 }
 
 func (s *ConcreteApiServer) PlayerResume(w http.ResponseWriter, _ *http.Request) {

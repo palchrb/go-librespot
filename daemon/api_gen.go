@@ -35,6 +35,15 @@ type ApiCacheDownload struct {
 	Uri string `json:"uri"`
 }
 
+// ApiCacheSnapshot A playlist's current revision and track count
+type ApiCacheSnapshot struct {
+	// Length Number of tracks in the playlist, when available
+	Length *int `json:"length"`
+
+	// SnapshotId The playlist snapshot id, or null for non-playlists
+	SnapshotId *string `json:"snapshot_id"`
+}
+
 // ApiContextTrackItem One entry of a context listing
 type ApiContextTrackItem struct {
 	// Track Full track metadata, or null while the background sweep has not resolved this entry yet
@@ -268,6 +277,12 @@ type ApiVolume struct {
 	Value uint32 `json:"value"`
 }
 
+// GetCacheSnapshotParams defines parameters for GetCacheSnapshot.
+type GetCacheSnapshotParams struct {
+	// Uri Spotify playlist URI
+	Uri string `form:"uri" json:"uri"`
+}
+
 // GetContextTracksParams defines parameters for GetContextTracks.
 type GetContextTracksParams struct {
 	// Uri Spotify context URI (playlist, album, artist, show, collection)
@@ -318,6 +333,9 @@ type ServerInterface interface {
 
 	// (POST /cache/download)
 	CacheDownload(w http.ResponseWriter, r *http.Request)
+
+	// (GET /cache/snapshot)
+	GetCacheSnapshot(w http.ResponseWriter, r *http.Request, params GetCacheSnapshotParams)
 
 	// (GET /context/tracks)
 	GetContextTracks(w http.ResponseWriter, r *http.Request, params GetContextTracksParams)
@@ -422,6 +440,40 @@ func (siw *ServerInterfaceWrapper) CacheDownload(w http.ResponseWriter, r *http.
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.CacheDownload(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetCacheSnapshot operation middleware
+func (siw *ServerInterfaceWrapper) GetCacheSnapshot(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetCacheSnapshotParams
+
+	// ------------- Required query parameter "uri" -------------
+
+	if paramValue := r.URL.Query().Get("uri"); paramValue != "" {
+
+	} else {
+		siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "uri"})
+		return
+	}
+
+	err = runtime.BindQueryParameter("form", true, true, "uri", r.URL.Query(), &params.Uri)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uri", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetCacheSnapshot(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -854,6 +906,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("GET "+options.BaseURL+"/{$}", wrapper.GetRoot)
 	m.HandleFunc("GET "+options.BaseURL+"/auth/code", wrapper.GetAuthCode)
 	m.HandleFunc("POST "+options.BaseURL+"/cache/download", wrapper.CacheDownload)
+	m.HandleFunc("GET "+options.BaseURL+"/cache/snapshot", wrapper.GetCacheSnapshot)
 	m.HandleFunc("GET "+options.BaseURL+"/context/tracks", wrapper.GetContextTracks)
 	m.HandleFunc("GET "+options.BaseURL+"/events", wrapper.GetEvents)
 	m.HandleFunc("POST "+options.BaseURL+"/player/add_to_queue", wrapper.PlayerAddToQueue)

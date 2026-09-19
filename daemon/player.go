@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -616,6 +617,44 @@ func (p *AppPlayer) handleApiRequest(req ApiRequest) (any, error) {
 			p.cacheContext(ctx, data.Uri)
 		})
 		return nil, nil
+	case ApiRequestTypeCacheSnapshot:
+		data := req.Data.(ApiRequestDataCacheSnapshot)
+		spotId, err := librespot.SpotifyIdFromUri(data.Uri)
+		if err != nil {
+			return nil, ErrBadRequest
+		}
+
+		// Only playlists carry a snapshot/revision. For anything else there is
+		// nothing to compare against, so report a null snapshot.
+		if spotId.Type() != librespot.SpotifyIdTypePlaylist {
+			return &ApiCacheSnapshot{}, nil
+		}
+
+		// Fetch the playlist revision from the internal spclient API (the same
+		// infrastructure used for metadata/storage), rather than the public Web
+		// API which is far more aggressively rate-limited. The revision changes
+		// on every playlist edit, so a client can compare it to decide whether
+		// the playlist needs re-caching. Nothing here touches player state, so
+		// the fetch runs off the loop.
+		reply := apiReply(req)
+		p.goDetached(playlistSnapshotTimeout, func(ctx context.Context) {
+			content, err := p.sess.Spclient().GetPlaylist(ctx, *spotId)
+			if err != nil {
+				reply.done(nil, fmt.Errorf("failed fetching playlist: %w", err))
+				return
+			}
+
+			snapshotId := hex.EncodeToString(content.Revision)
+			resp := &ApiCacheSnapshot{SnapshotId: &snapshotId}
+			if content.Length != nil {
+				length := int(*content.Length)
+				resp.Length = &length
+			}
+
+			reply.done(resp, nil)
+		})
+
+		return nil, errReplyDeferred
 	case ApiRequestTypeResume:
 		_ = p.play()
 		return nil, nil
