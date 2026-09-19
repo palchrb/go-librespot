@@ -120,3 +120,12 @@ func TestLoadCLIConfigWaitForReaderFlag(t *testing.T) {
 	})
 	require.True(t, cfg.AudioOutputPipeWaitForReader, "audio_output_pipe_wait_for_reader was not parsed from the config file")
 }
+
+func TestCacheDownloadMaxTracksMapping(t *testing.T) {
+	var c cliConfig
+	c.Cache.Download.MaxTracks = 250
+	require.Equal(t, 250, c.toDaemonConfig().Cache.Download.MaxTracks)
+
+	c.Cache.Download.MaxTracks = 0
+	require.Zero(t, c.toDaemonConfig().Cache.Download.MaxTracks)
+}

@@ -87,6 +87,23 @@ type CacheConfig struct {
 	// SizeLimit is the maximum total size of the cached audio files in bytes.
 	// A value of zero disables eviction (unbounded cache).
 	SizeLimit int64
+	// Download configures the on-demand pre-cache download pacing.
+	Download CacheDownloadConfig
+}
+
+// CacheDownloadConfig paces the on-demand pre-caching of a context so a bulk
+// download does not look like abuse to Spotify.
+type CacheDownloadConfig struct {
+	// Concurrency is how many tracks download at once.
+	Concurrency int
+	// MinDelay is the minimum delay between starting each track download.
+	MinDelay time.Duration
+	// Jitter is an additional random delay (0..Jitter) added to MinDelay.
+	Jitter time.Duration
+	// MaxTracks caps how many tracks of a context are pre-cached. A context
+	// longer than this is not what a size limited on-disk cache is for: the
+	// tail would only evict the head it just downloaded.
+	MaxTracks int
 }
 
 type CredentialsConfig struct {

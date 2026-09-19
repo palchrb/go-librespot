@@ -146,6 +146,7 @@ var endpointMethods = map[string][]string{
 	"/player/add_to_queue":    {http.MethodPost},
 	"/player/output":          {http.MethodPost},
 	"/context/tracks":         {http.MethodGet},
+	"/cache/download":         {http.MethodPost},
 }
 
 func TestApiRejectsWrongMethod(t *testing.T) {
@@ -599,6 +600,29 @@ func TestApiReopenOutput(t *testing.T) {
 		resp := ts.do(http.MethodPost, "/player/output", map[string]any{"device": ""})
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		require.Equal(t, "", ts.request().Data)
+	})
+}
+
+func TestApiCacheDownload(t *testing.T) {
+	t.Run("forwards the context uri", func(t *testing.T) {
+		ts := newTestServer(t, okReply)
+
+		resp := ts.do(http.MethodPost, "/cache/download", map[string]any{"uri": "spotify:playlist:a"})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		req := ts.request()
+		require.Equal(t, ApiRequestTypeCacheDownload, req.Type)
+		require.Equal(t, ApiCacheDownload{Uri: "spotify:playlist:a"}, req.Data)
+	})
+
+	// Nothing to pre-cache without a context: refused before the daemon is
+	// asked to resolve an empty uri.
+	t.Run("refuses a missing uri", func(t *testing.T) {
+		ts := newTestServer(t, okReply)
+
+		resp := ts.do(http.MethodPost, "/cache/download", map[string]any{})
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		ts.requireNoRequest()
 	})
 }
 

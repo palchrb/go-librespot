@@ -17,8 +17,11 @@ import (
 	"github.com/devgianlu/go-librespot/mpris"
 	"github.com/devgianlu/go-librespot/player"
 	"github.com/devgianlu/go-librespot/playplay"
+	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
 	devicespb "github.com/devgianlu/go-librespot/proto/spotify/connectstate/devices"
 	"github.com/devgianlu/go-librespot/session"
+	"github.com/devgianlu/go-librespot/spclient"
+	"github.com/devgianlu/go-librespot/tracks"
 	"github.com/devgianlu/go-librespot/zeroconf"
 	"golang.org/x/exp/rand"
 )
@@ -315,6 +318,12 @@ func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err 
 	appPlayer.statePush = newStatePushLane(app.log, appPlayer.sess.Spclient(), app.deviceId)
 	if app.metaCache != nil {
 		appPlayer.meta = newMetaFetcher(app.log, app.metaCache, appPlayer.sess.Spclient())
+	}
+	appPlayer.precacheResolve = func(ctx context.Context, uri string) (tracks.ContextResolver, error) {
+		// A context of its own, never the playing one: the resolver behind a
+		// track list mutates its pages as it walks, and is reachable only from
+		// the loader lane.
+		return spclient.NewContextResolver(ctx, app.log, appPlayer.sess.Spclient(), &connectpb.Context{Uri: uri})
 	}
 
 	if appPlayer.player, err = player.NewPlayer(&player.Options{

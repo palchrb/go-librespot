@@ -82,6 +82,12 @@ type cliConfig struct {
 		Enabled   bool   `koanf:"enabled"`
 		Dir       string `koanf:"dir"`
 		SizeLimit string `koanf:"size_limit"`
+		Download  struct {
+			Concurrency int `koanf:"concurrency"`
+			MinDelayMs  int `koanf:"min_delay_ms"`
+			JitterMs    int `koanf:"jitter_ms"`
+			MaxTracks   int `koanf:"max_tracks"`
+		} `koanf:"download"`
 	} `koanf:"cache"`
 
 	Metadata struct {
@@ -158,6 +164,10 @@ func (c *cliConfig) toDaemonConfig() *daemon.Config {
 	}
 	// The value is validated in loadCLIConfig, so the error is unreachable here.
 	dc.Cache.SizeLimit, _ = parseSize(c.Cache.SizeLimit)
+	dc.Cache.Download.Concurrency = c.Cache.Download.Concurrency
+	dc.Cache.Download.MinDelay = time.Duration(c.Cache.Download.MinDelayMs) * time.Millisecond
+	dc.Cache.Download.Jitter = time.Duration(c.Cache.Download.JitterMs) * time.Millisecond
+	dc.Cache.Download.MaxTracks = c.Cache.Download.MaxTracks
 	dc.Metadata.Enabled = c.Metadata.Enabled
 	dc.Metadata.ContextSweep = c.Metadata.ContextSweep
 	dc.Metadata.MaxTracks = c.Metadata.MaxTracks
@@ -223,6 +233,11 @@ func loadCLIConfig(cfg *cliConfig) error {
 
 		"cache.enabled":    false,
 		"cache.size_limit": "1GB",
+
+		"cache.download.concurrency":  2,
+		"cache.download.min_delay_ms": 1500,
+		"cache.download.jitter_ms":    1000,
+		"cache.download.max_tracks":   800,
 
 		"metadata.enabled":       false,
 		"metadata.context_sweep": false,

@@ -29,6 +29,12 @@ type ApiAddToQueue struct {
 	Uri string `json:"uri"`
 }
 
+// ApiCacheDownload A pre-cache download payload
+type ApiCacheDownload struct {
+	// Uri Spotify URI of the context (playlist, album, artist, track or episode) to download into the cache
+	Uri string `json:"uri"`
+}
+
 // ApiContextTrackItem One entry of a context listing
 type ApiContextTrackItem struct {
 	// Track Full track metadata, or null while the background sweep has not resolved this entry yet
@@ -268,6 +274,9 @@ type GetContextTracksParams struct {
 	Uri string `form:"uri" json:"uri"`
 }
 
+// CacheDownloadJSONRequestBody defines body for CacheDownload for application/json ContentType.
+type CacheDownloadJSONRequestBody = ApiCacheDownload
+
 // PlayerAddToQueueJSONRequestBody defines body for PlayerAddToQueue for application/json ContentType.
 type PlayerAddToQueueJSONRequestBody = ApiAddToQueue
 
@@ -306,6 +315,9 @@ type ServerInterface interface {
 
 	// (GET /auth/code)
 	GetAuthCode(w http.ResponseWriter, r *http.Request)
+
+	// (POST /cache/download)
+	CacheDownload(w http.ResponseWriter, r *http.Request)
 
 	// (GET /context/tracks)
 	GetContextTracks(w http.ResponseWriter, r *http.Request, params GetContextTracksParams)
@@ -396,6 +408,20 @@ func (siw *ServerInterfaceWrapper) GetAuthCode(w http.ResponseWriter, r *http.Re
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetAuthCode(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CacheDownload operation middleware
+func (siw *ServerInterfaceWrapper) CacheDownload(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CacheDownload(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -827,6 +853,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 
 	m.HandleFunc("GET "+options.BaseURL+"/{$}", wrapper.GetRoot)
 	m.HandleFunc("GET "+options.BaseURL+"/auth/code", wrapper.GetAuthCode)
+	m.HandleFunc("POST "+options.BaseURL+"/cache/download", wrapper.CacheDownload)
 	m.HandleFunc("GET "+options.BaseURL+"/context/tracks", wrapper.GetContextTracks)
 	m.HandleFunc("GET "+options.BaseURL+"/events", wrapper.GetEvents)
 	m.HandleFunc("POST "+options.BaseURL+"/player/add_to_queue", wrapper.PlayerAddToQueue)

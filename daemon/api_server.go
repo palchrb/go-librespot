@@ -128,6 +128,7 @@ const (
 	ApiRequestSetDeviceName           ApiRequestType = "set_device_name"
 	ApiRequestTypeReopenOutput        ApiRequestType = "reopen_output"
 	ApiRequestTypeContextTracks       ApiRequestType = "context_tracks"
+	ApiRequestTypeCacheDownload       ApiRequestType = "cache_download"
 )
 
 // ApiRequestDataContextTracks carries the uri query parameter of the context
@@ -491,6 +492,16 @@ func (s *ConcreteApiServer) GetToken(w http.ResponseWriter, _ *http.Request) {
 
 func (s *ConcreteApiServer) GetContextTracks(w http.ResponseWriter, _ *http.Request, params GetContextTracksParams) {
 	s.handleRequest(ApiRequest{Type: ApiRequestTypeContextTracks, Data: ApiRequestDataContextTracks{Uri: params.Uri}}, w)
+}
+
+func (s *ConcreteApiServer) CacheDownload(w http.ResponseWriter, r *http.Request) {
+	var data ApiCacheDownload
+	if err := jsonDecode(r, &data); err != nil || len(data.Uri) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	s.handleRequest(ApiRequest{Type: ApiRequestTypeCacheDownload, Data: data}, w)
 }
 
 func (s *ConcreteApiServer) PlayerResume(w http.ResponseWriter, _ *http.Request) {

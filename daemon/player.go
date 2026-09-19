@@ -24,6 +24,7 @@ import (
 	"github.com/devgianlu/go-librespot/player"
 	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
 	"github.com/devgianlu/go-librespot/session"
+	"github.com/devgianlu/go-librespot/tracks"
 )
 
 // AppPlayer owns the player's state and is the only thing that may touch it.
@@ -126,6 +127,11 @@ type AppPlayer struct {
 	// lastFullMetaContext is the context uri the last full sweep ran for, so
 	// replaying the same playlist does not re-sweep it. Run goroutine only.
 	lastFullMetaContext string
+
+	// precacheResolve opens a context of its own to enumerate a pre-cache run.
+	// Always set, unlike meta: pre-caching is its own feature and works with
+	// metadata.enabled false.
+	precacheResolve func(ctx context.Context, uri string) (tracks.ContextResolver, error)
 
 	// sleepTimer fires the duration requested by the most recent
 	// set_sleep_timer command, pausing playback. Stopped/reset (never left
@@ -602,6 +608,14 @@ func (p *AppPlayer) handleApiRequest(req ApiRequest) (any, error) {
 		p.scheduleContextEnumerate(data.Uri)
 
 		return p.contextTracksResponse(data.Uri, uris, ready), nil
+	case ApiRequestTypeCacheDownload:
+		data := req.Data.(ApiCacheDownload)
+		// Fire-and-forget: pre-caching a whole context can take a while, so it
+		// runs detached from the player loop and the request returns at once.
+		p.goDetached(precacheTimeout, func(ctx context.Context) {
+			p.cacheContext(ctx, data.Uri)
+		})
+		return nil, nil
 	case ApiRequestTypeResume:
 		_ = p.play()
 		return nil, nil

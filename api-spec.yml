@@ -244,6 +244,17 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/contextTrackItem'
+    cacheDownload:
+      x-go-name: ApiCacheDownload
+      description: A pre-cache download payload
+      type: object
+      required: [ uri ]
+      properties:
+        uri:
+          description: >-
+            Spotify URI of the context (playlist, album, artist, track or
+            episode) to download into the cache
+          type: string
     root:
       x-go-name: ApiRoot
       description: API reachability and playback readiness
@@ -539,6 +550,23 @@ paths:
           description: The uri does not name a listable context
         404:
           description: The metadata cache is disabled
+  /cache/download:
+    post:
+      operationId: cacheDownload
+      description: >-
+        Download every track of a context (playlist, album, artist, track or
+        episode) into the on-disk cache without playing it. Requires the cache
+        to be enabled. Runs in the background and returns immediately; the
+        download is paced to avoid hammering Spotify. Only the encrypted audio
+        is stored, so the audio key is still required at playback time.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/cacheDownload'
+      responses:
+        200:
+          description: Successful response
   /player/play:
     post:
       operationId: playerPlay
