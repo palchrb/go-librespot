@@ -10,7 +10,9 @@ import (
 	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
+	"github.com/devgianlu/go-librespot/mpris"
 	"github.com/devgianlu/go-librespot/player"
+	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
 	"github.com/stretchr/testify/require"
 )
 
@@ -570,7 +572,8 @@ func TestForgetReplacedStreamEventsKeepsTheRest(t *testing.T) {
 // A job that failed still reaches its commit, so whoever asked for the load
 // learns it did not happen, and still owes its caller the failure.
 func TestApplyLoaderResultReportsFailure(t *testing.T) {
-	p := &AppPlayer{app: &App{log: &librespot.NullLogger{}}, loadGen: 1}
+	p := newTestAppPlayer(t)
+	p.loadGen = 1
 
 	var committed error
 	reply, answered := recordingReply(t)
@@ -589,4 +592,101 @@ func TestApplyLoaderResultReportsFailure(t *testing.T) {
 	err, called := answered()
 	require.True(t, called)
 	require.ErrorIs(t, err, boom)
+}
+
+// recordingApiServer keeps what the daemon emits so a test can assert on it.
+type recordingApiServer struct {
+	events []*ApiEvent
+}
+
+func (s *recordingApiServer) Emit(ev *ApiEvent)          { s.events = append(s.events, ev) }
+func (s *recordingApiServer) Receive() <-chan ApiRequest { return nil }
+func (s *recordingApiServer) SetAuthCode(*ApiDeviceAuth) {}
+func (s *recordingApiServer) Close() error               { return nil }
+
+func newFailedLoadTestPlayer(t *testing.T) (*AppPlayer, *recordingApiServer) {
+	t.Helper()
+
+	p := newTestAppPlayer(t)
+	server := &recordingApiServer{}
+	p.app.server = server
+	p.app.mpris = mpris.DummyServer{}
+	p.state.device = &connectpb.DeviceInfo{}
+
+	// What loadCurrentTrack announces before submitting the fetch.
+	p.state.player.IsPlaying = true
+	p.state.player.IsBuffering = true
+	p.state.player.PlaybackSpeed = 0
+	p.loadGen = 1
+	p.loadInFlight = true
+	return p, server
+}
+
+func stoppedEvents(events []*ApiEvent) int {
+	var n int
+	for _, ev := range events {
+		if ev.Type == ApiEventTypeStopped {
+			n++
+		}
+	}
+	return n
+}
+
+// A load that fails with nothing following it used to leave the state as it
+// was announced — playing and buffering — with no event to say otherwise.
+func TestApplyLoaderResultReportsAFailedLoadAsStopped(t *testing.T) {
+	p, server := newFailedLoadTestPlayer(t)
+
+	p.applyLoaderResult(loaderResult{
+		class:  classLoad,
+		gen:    1,
+		err:    errors.New("cdn timeout"),
+		commit: func(_ *AppPlayer, _ error) {},
+	})
+
+	require.False(t, p.state.player.IsPlaying)
+	require.False(t, p.state.player.IsBuffering)
+	require.False(t, p.loadInFlight)
+	require.Equal(t, 1, stoppedEvents(server.events))
+}
+
+// Skipping past an unplayable track fails the load and immediately walks on to
+// the next one. That path bumps the generation before returning, which is how
+// it is told apart from a load nothing follows: the state stays buffering for
+// the load that is coming, and no stopped is emitted in between.
+func TestApplyLoaderResultLeavesAFailedLoadThatMovedOn(t *testing.T) {
+	p, server := newFailedLoadTestPlayer(t)
+
+	p.applyLoaderResult(loaderResult{
+		class: classLoad,
+		gen:   1,
+		err:   errors.New("audio key refused"),
+		commit: func(p *AppPlayer, _ error) {
+			p.loadGen++
+		},
+	})
+
+	require.True(t, p.state.player.IsPlaying)
+	require.True(t, p.state.player.IsBuffering)
+	require.Zero(t, stoppedEvents(server.events))
+}
+
+// A context load keeps the outgoing stream playing until the new track is
+// known. When the resolve fails that stream is still audible, so the daemon is
+// not stopped: only the buffering it announced has to go.
+func TestApplyLoaderResultKeepsTheOutgoingStreamWhenAResolveFails(t *testing.T) {
+	p, server := newFailedLoadTestPlayer(t)
+	p.primaryStream = &player.Stream{}
+
+	p.applyLoaderResult(loaderResult{
+		class:  classLoad,
+		gen:    1,
+		err:    errors.New("context unavailable"),
+		commit: func(_ *AppPlayer, _ error) {},
+	})
+
+	require.True(t, p.state.player.IsPlaying)
+	require.False(t, p.state.player.IsBuffering)
+	require.Equal(t, float64(1), p.state.player.PlaybackSpeed, "resumed at normal speed")
+	require.Zero(t, stoppedEvents(server.events))
 }

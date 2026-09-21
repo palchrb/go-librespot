@@ -8,6 +8,7 @@ import (
 	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
+	"github.com/devgianlu/go-librespot/mpris"
 	"github.com/devgianlu/go-librespot/player"
 	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
 	"github.com/devgianlu/go-librespot/tracks"
@@ -74,7 +75,50 @@ func (p *AppPlayer) applyLoaderResult(res loaderResult) {
 		res.commit(p, res.err)
 	}
 
+	// A load that failed and whose commit did not move on to another one
+	// leaves nobody to clear the buffering state it was announced with. The
+	// generation tells the two apart: every path that loads something else
+	// bumps it before returning here.
+	if res.class == classLoad && res.err != nil && res.gen == p.loadGen && !p.loadInFlight {
+		p.loadFailed()
+	}
+
 	res.reply.done(res.value, res.err)
+}
+
+// loadFailed reports that the track being loaded is not coming. The state was
+// set to buffering when the load was announced, and only a landing or a player
+// event would clear it, so without this the daemon would claim to be loading
+// forever: no stopped event, no MPRIS update, and clients left polling.
+//
+// Which state is honest depends on whether the outgoing stream was already
+// unloaded. A track load unloads it first, so nothing plays and the daemon is
+// stopped. A context load lets it carry on until the new track is known, so a
+// resolve that fails leaves it playing, and only the buffering has to go.
+func (p *AppPlayer) loadFailed() {
+	if !p.state.player.IsBuffering {
+		return
+	}
+
+	if p.primaryStream != nil {
+		p.state.player.IsBuffering = false
+		p.state.setPaused(p.state.player.IsPaused)
+		p.updateState()
+		return
+	}
+
+	p.state.player.IsPlaying = false
+	p.state.player.IsPaused = false
+	p.state.player.IsBuffering = false
+	p.updateState()
+
+	p.app.server.Emit(&ApiEvent{
+		Type: ApiEventTypeStopped,
+		Data: ApiEventDataStopped{
+			PlayOrigin: p.state.playOrigin(),
+		},
+	})
+	p.emitMprisUpdate(mpris.Stopped)
 }
 
 // generation reports the counter a job of this class is stamped with, so that

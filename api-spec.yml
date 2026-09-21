@@ -203,6 +203,18 @@ components:
             - $ref: '#/components/schemas/track'
           nullable: true
           x-omitempty: true
+        pending_track:
+          description: >-
+            The track being loaded, while a load is outstanding and its
+            metadata is cached (metadata.enabled). track is null until a load
+            lands, and a burst of skips holds the load back on purpose, so
+            this is what tells a client where the pointer is in the meantime.
+            Absent when nothing is loading or the metadata is unknown; the
+            will_play event carries the uri regardless.
+          allOf:
+            - $ref: '#/components/schemas/track'
+          nullable: true
+          x-omitempty: true
     contextTrackItem:
       x-go-name: ApiContextTrackItem
       description: One entry of a context listing

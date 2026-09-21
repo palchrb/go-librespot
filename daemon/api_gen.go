@@ -182,6 +182,9 @@ type ApiStatus struct {
 	// Paused Whether the player is paused
 	Paused bool `json:"paused"`
 
+	// PendingTrack The track being loaded, while a load is outstanding and its metadata is cached (metadata.enabled). track is null until a load lands, and a burst of skips holds the load back on purpose, so this is what tells a client where the pointer is in the meantime. Absent when nothing is loading or the metadata is unknown; the will_play event carries the uri regardless.
+	PendingTrack *ApiTrack `json:"pending_track,omitempty"`
+
 	// PlayOrigin Who started the playback, "go-librespot" identifies the API as the play origin, everything else is Spotify own stuff, null when nothing has started playback yet
 	PlayOrigin *string `json:"play_origin"`
 
