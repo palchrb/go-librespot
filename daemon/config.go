@@ -31,10 +31,10 @@ type Config struct {
 	ExternalVolume            bool
 	DisableAutoplay           bool
 
-	// SkipDebounce is how long to wait after a burst of next/prev commands
-	// before actually loading the track the pointer landed on, so mashing the
-	// skip button costs one audio-key request instead of one per press. Zero
-	// disables debouncing (every skip loads immediately).
+	// SkipDebounce is how long a skip that follows another within this window
+	// waits before loading the track it landed on, so that a burst of next or
+	// prev presses costs one load rather than one per press. Zero loads every
+	// skip immediately.
 	SkipDebounce time.Duration
 
 	ZeroconfEnabled               bool
@@ -54,7 +54,27 @@ type Config struct {
 
 	Cache CacheConfig
 
+	Metadata MetadataConfig
+
 	Credentials CredentialsConfig
+}
+
+// MetadataConfig configures the in-memory track metadata cache behind the
+// next_track status field and the /context/tracks listing. Everything here is
+// opt-in: a headless speaker has no use for metadata beyond the playing track
+// and should not pay network requests for it.
+type MetadataConfig struct {
+	// Enabled turns on the metadata cache, the batched fetch of metadata for
+	// the tracks around the playback position, and the /context/tracks
+	// endpoint. Off, the daemon performs no metadata request playback does not
+	// need.
+	Enabled bool
+	// ContextSweep additionally resolves metadata for the whole context when
+	// one starts playing, so every track is known before the user skips
+	// anywhere. Requires Enabled.
+	ContextSweep bool
+	// MaxTracks caps how many tracks of a context are enumerated and swept.
+	MaxTracks int
 }
 
 // CacheConfig configures the on-disk cache for downloaded (encrypted) audio
@@ -80,6 +100,10 @@ type CacheDownloadConfig struct {
 	MinDelay time.Duration
 	// Jitter is an additional random delay (0..Jitter) added to MinDelay.
 	Jitter time.Duration
+	// MaxTracks caps how many tracks of a context are pre-cached. A context
+	// longer than this is not what a size limited on-disk cache is for: the
+	// tail would only evict the head it just downloaded.
+	MaxTracks int
 }
 
 type CredentialsConfig struct {

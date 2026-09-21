@@ -21,8 +21,7 @@ import (
 // decoding is performed: caching stores the encrypted file, so decryption only
 // happens later, at playback time.
 //
-// It is a no-op (returning nil) when the cache is disabled or the file is
-// already cached.
+// It is a no-op (returning nil) when the file is already cached.
 func (p *Player) CacheTrack(ctx context.Context, client *http.Client, spotId librespot.SpotifyId, bitrate int) error {
 	if p.cache == nil {
 		return fmt.Errorf("cache is not enabled")
@@ -57,7 +56,7 @@ func (p *Player) CacheTrack(ctx context.Context, client *http.Client, spotId lib
 			return fmt.Errorf("failed getting episode metadata: %w", err)
 		}
 
-		if isMediaRestricted(librespot.NewMediaFromEpisode(&episodeMeta), *p.countryCode) {
+		if isMediaRestricted(librespot.NewMediaFromEpisode(&episodeMeta), p.countryCode()) {
 			return librespot.ErrMediaRestricted
 		}
 
@@ -72,7 +71,9 @@ func (p *Player) CacheTrack(ctx context.Context, client *http.Client, spotId lib
 
 	// Already cached: nothing to do (and no request is made to Spotify).
 	if cached, ok := p.cache.File(file.FileId); ok {
-		_ = cached.(io.Closer).Close()
+		if closer, ok := cached.(io.Closer); ok {
+			_ = closer.Close()
+		}
 		log.Debugf("file %x already cached", file.FileId)
 		return nil
 	}
@@ -89,8 +90,8 @@ func (p *Player) CacheTrack(ctx context.Context, client *http.Client, spotId lib
 	}
 
 	// Build the reader directly from the CDN urls. Unlike NewStream this does
-	// not touch the player's cdnQuarantine map, so pre-caching can safely run
-	// concurrently with playback.
+	// not touch the player's cdnQuarantine map, which only manageLoop's lane may
+	// read and write, so pre-caching can safely run concurrently with playback.
 	var raw *audio.HttpChunkedReader
 	var rerr error
 	for _, cdnUrl := range storageResolve.Cdnurl {

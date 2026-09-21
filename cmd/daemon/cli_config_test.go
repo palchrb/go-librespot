@@ -7,26 +7,63 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
+func TestDefaultAudioBackend(t *testing.T) {
+	got := defaultAudioBackend()
+	switch runtime.GOOS {
+	case "windows":
+		require.Equal(t, "wasapi", got)
+	case "darwin":
+		require.Equal(t, "audio-toolbox", got)
+	default:
+		require.Equal(t, "alsa", got)
+	}
+}
+
+func TestLoadCLIConfigAudioBackend(t *testing.T) {
+	defaultBackend := "alsa"
+	switch runtime.GOOS {
+	case "darwin":
+		defaultBackend = "audio-toolbox"
+	case "windows":
+		defaultBackend = "wasapi"
+	}
+	for _, tc := range []struct {
+		name, config, want string
+	}{
+		{"platform default", "initial_volume: 0\n", defaultBackend},
+		{"explicit override", "audio_backend: pipe\ninitial_volume: 0\n", "pipe"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yml"), []byte(tc.config), 0o600))
+			oldArgs := os.Args
+			t.Cleanup(func() { os.Args = oldArgs })
+			os.Args = []string{"test", "--config_dir", dir}
+			cfg := new(cliConfig)
+			require.NoError(t, loadCLIConfig(cfg))
+			t.Cleanup(func() {
+				if cfg.configLock != nil {
+					require.NoError(t, cfg.configLock.Unlock())
+				}
+			})
+			require.Equal(t, tc.want, cfg.AudioBackend)
+			require.Zero(t, cfg.InitialVolume, "explicit mute must survive default config merging")
+		})
+	}
+}
+
 func TestSkipDebounceMapping(t *testing.T) {
 	var c cliConfig
 	c.SkipDebounceMs = 400
-	require.Equal(t, int64(400_000_000), int64(c.toDaemonConfig().SkipDebounce))
+	require.Equal(t, 400*time.Millisecond, c.toDaemonConfig().SkipDebounce)
 
 	c.SkipDebounceMs = 0
 	require.Zero(t, c.toDaemonConfig().SkipDebounce)
-}
-
-func TestDefaultAudioBackend(t *testing.T) {
-	got := defaultAudioBackend()
-	if runtime.GOOS == "windows" {
-		require.Equal(t, "wasapi", got)
-		return
-	}
-	require.Equal(t, "alsa", got)
 }
 
 func TestParseSize(t *testing.T) {
@@ -82,4 +119,13 @@ func TestLoadCLIConfigWaitForReaderFlag(t *testing.T) {
 		}
 	})
 	require.True(t, cfg.AudioOutputPipeWaitForReader, "audio_output_pipe_wait_for_reader was not parsed from the config file")
+}
+
+func TestCacheDownloadMaxTracksMapping(t *testing.T) {
+	var c cliConfig
+	c.Cache.Download.MaxTracks = 250
+	require.Equal(t, 250, c.toDaemonConfig().Cache.Download.MaxTracks)
+
+	c.Cache.Download.MaxTracks = 0
+	require.Zero(t, c.toDaemonConfig().Cache.Download.MaxTracks)
 }

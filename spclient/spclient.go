@@ -101,11 +101,7 @@ func (c *Spclient) innerRequestWith(ctx context.Context, client *http.Client, me
 	}
 
 	if body != nil {
-		// Callers that send something other than protobuf (the connect
-		// transfer command is JSON) set their own Content-Type; don't clobber it.
-		if req.Header.Get("Content-Type") == "" {
-			req.Header.Set("Content-Type", "application/x-protobuf")
-		}
+		req.Header.Set("Content-Type", "application/x-protobuf")
 
 		req.GetBody = func() (io.ReadCloser, error) {
 			return io.NopCloser(bytes.NewReader(body)), nil
@@ -239,65 +235,19 @@ func (c *Spclient) PutConnectStateInactive(ctx context.Context, spotConnId strin
 	}
 }
 
-// connectTransferBody builds the JSON body of a transfer command. The
-// transfer_options object mirrors the restore_paused option the daemon itself
-// receives on inbound transfers; empty restorePaused omits the options object
-// entirely and leaves the behavior to the service's defaults.
-func connectTransferBody(restorePaused string) ([]byte, error) {
-	if restorePaused == "" {
-		return []byte("{}"), nil
-	}
-	return json.Marshal(map[string]any{
-		"transfer_options": map[string]string{"restore_paused": restorePaused},
-	})
-}
-
-// ConnectTransfer asks the connect-state service to move the playback session
-// owned by fromDeviceId onto toDeviceId. The service builds the TransferState
-// from the source device's published state and delivers it to the target as a
-// dealer "transfer" command — the caller never serializes playback state.
-//
-// A 429 is returned as a RateLimitedError so callers can surface it as such
-// instead of a generic failure.
-func (c *Spclient) ConnectTransfer(ctx context.Context, fromDeviceId, toDeviceId, restorePaused string) error {
-	body, err := connectTransferBody(restorePaused)
-	if err != nil {
-		return fmt.Errorf("failed marshalling transfer body: %w", err)
-	}
-
-	resp, err := c.Request(
-		ctx,
-		"POST",
-		fmt.Sprintf("/connect-state/v1/connect/transfer/from/%s/to/%s", fromDeviceId, toDeviceId),
-		nil,
-		http.Header{"Content-Type": []string{"application/json"}},
-		body,
-	)
-	if err != nil {
-		return err
-	}
-
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return &RateLimitedError{
-			RetryAfter: parseRetryAfter(resp.Header),
-			err:        fmt.Errorf("connect transfer request failed with status %d", resp.StatusCode),
-		}
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("connect transfer request failed with status %d", resp.StatusCode)
-	}
-
-	c.log.Debugf("requested transfer to device %s", toDeviceId)
-	return nil
-}
-
 func (c *Spclient) PutConnectState(ctx context.Context, spotConnId string, reqProto *connectpb.PutStateRequest) (*connectpb.Cluster, error) {
 	reqBody, err := proto.Marshal(reqProto)
 	if err != nil {
 		return nil, fmt.Errorf("failed marshalling PutStateRequest: %w", err)
 	}
+
+	return c.PutConnectStateRaw(ctx, spotConnId, reqProto.PutStateReason, reqBody)
+}
+
+// PutConnectStateRaw PUTs an already marshalled PutStateRequest. Marshalling in
+// the caller lets it hand over a snapshot of state it goes on mutating, rather
+// than a proto this call would walk from another goroutine.
+func (c *Spclient) PutConnectStateRaw(ctx context.Context, spotConnId string, reason connectpb.PutStateReason, reqBody []byte) (*connectpb.Cluster, error) {
 	respBody, err := backoff.RetryWithData(func() ([]byte, error) {
 		resp, err := c.Request(
 			ctx,
@@ -335,7 +285,7 @@ func (c *Spclient) PutConnectState(ctx context.Context, spotConnId string, reqPr
 			}
 			return nil, reqErr
 		} else {
-			c.log.Debugf("put connect state because %s", reqProto.PutStateReason)
+			c.log.Debugf("put connect state because %s", reason)
 			return io.ReadAll(resp.Body)
 		}
 	}, backoff.WithContext(backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Second), 2), ctx))
@@ -491,6 +441,39 @@ func (c *Spclient) ExtendedMetadataSimple(ctx context.Context, id librespot.Spot
 	return fmt.Errorf("extended metadata with kind %s not found", ext)
 }
 
+// GetPlaylist fetches a playlist's head revision and contents. Unlike
+// PlaylistSignals this is a plain read: no signals are emitted and no base
+// revision is implied, so the revision it returns is the playlist's current
+// one whatever the caller knows.
+func (c *Spclient) GetPlaylist(ctx context.Context, playlist librespot.SpotifyId) (*playlist4pb.SelectedListContent, error) {
+	if playlist.Type() != librespot.SpotifyIdTypePlaylist {
+		return nil, fmt.Errorf("invalid type: %s", playlist.Type())
+	}
+
+	resp, err := c.Request(ctx, "GET", fmt.Sprintf("/playlist/v2/playlist/%s", playlist.Base62()), nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("invalid status code from playlist: %d", resp.StatusCode)
+	}
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading response body: %w", err)
+	}
+
+	var protoResp playlist4pb.SelectedListContent
+	if err := proto.Unmarshal(respBytes, &protoResp); err != nil {
+		return nil, fmt.Errorf("failed unmarshalling SelectedListContent: %w", err)
+	}
+
+	return &protoResp, nil
+}
+
 func (c *Spclient) PlaylistSignals(ctx context.Context, playlist librespot.SpotifyId, reqProto *playlist4pb.ListSignals, lenses []string) (*playlist4pb.SelectedListContent, error) {
 	if playlist.Type() != librespot.SpotifyIdTypePlaylist {
 		panic(fmt.Sprintf("invalid type: %s", playlist.Type()))
@@ -512,35 +495,6 @@ func (c *Spclient) PlaylistSignals(ctx context.Context, playlist librespot.Spoti
 
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("invalid status code from playlist signals: %d", resp.StatusCode)
-	}
-
-	respBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed reading response body: %w", err)
-	}
-
-	var protoResp playlist4pb.SelectedListContent
-	if err := proto.Unmarshal(respBytes, &protoResp); err != nil {
-		return nil, fmt.Errorf("failed unmarshalling SelectedListContent: %w", err)
-	}
-
-	return &protoResp, nil
-}
-
-func (c *Spclient) GetPlaylist(ctx context.Context, playlist librespot.SpotifyId) (*playlist4pb.SelectedListContent, error) {
-	if playlist.Type() != librespot.SpotifyIdTypePlaylist {
-		return nil, fmt.Errorf("invalid type: %s", playlist.Type())
-	}
-
-	resp, err := c.Request(ctx, "GET", fmt.Sprintf("/playlist/v2/playlist/%s", playlist.Base62()), nil, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("invalid status code from playlist: %d", resp.StatusCode)
 	}
 
 	respBytes, err := io.ReadAll(resp.Body)

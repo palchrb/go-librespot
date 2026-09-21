@@ -8,6 +8,7 @@ package daemon
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/oapi-codegen/runtime"
 )
@@ -43,58 +44,6 @@ type ApiCacheSnapshot struct {
 	SnapshotId *string `json:"snapshot_id"`
 }
 
-// ApiConnectDevice A Spotify Connect device in the account's device cluster
-type ApiConnectDevice struct {
-	// Active Whether this device currently owns playback
-	Active bool `json:"active"`
-
-	// Brand The device brand, empty when not reported
-	Brand string `json:"brand"`
-
-	// CanPlay Whether the device can accept playback
-	CanPlay bool `json:"can_play"`
-
-	// Id The Spotify Connect device ID
-	Id string `json:"id"`
-
-	// Model The device model, empty when not reported
-	Model string `json:"model"`
-
-	// Name The device name
-	Name string `json:"name"`
-
-	// Self Whether this device is the daemon itself
-	Self bool `json:"self"`
-
-	// Type The device type, for example COMPUTER or SPEAKER
-	Type string `json:"type"`
-
-	// Volume The device volume, from 0 to 65535
-	Volume uint32 `json:"volume"`
-
-	// VolumeSteps The device's volume step count, 0 when not reported
-	VolumeSteps int32 `json:"volume_steps"`
-}
-
-// ApiConnectDevices The account's Spotify Connect device cluster
-type ApiConnectDevices struct {
-	// ActiveDeviceId Device ID that owns playback, or null when nothing is active
-	ActiveDeviceId *string            `json:"active_device_id"`
-	Devices        []ApiConnectDevice `json:"devices"`
-
-	// UpdatedAt When the cluster was last seen, as a unix millisecond timestamp; null when no cluster has been received yet. Cluster pushes only arrive on change, so an old timestamp on a quiet account is normal, not an error.
-	UpdatedAt *int64 `json:"updated_at"`
-}
-
-// ApiConnectTransfer A transfer playback payload
-type ApiConnectTransfer struct {
-	// DeviceId The Spotify Connect device ID to move playback to
-	DeviceId string `json:"device_id"`
-
-	// RestorePaused What the target should do with a paused session: "restore" keeps it paused, "resume" starts playing. Empty leaves it to the service's default.
-	RestorePaused string `json:"restore_paused,omitempty"`
-}
-
 // ApiContextTrackItem One entry of a context listing
 type ApiContextTrackItem struct {
 	// Track Full track metadata, or null while the background sweep has not resolved this entry yet
@@ -118,6 +67,18 @@ type ApiContextTracks struct {
 
 	// Uri The context URI
 	Uri string `json:"uri"`
+}
+
+// ApiDeviceAuth The pairing details of an in-flight device authorization flow
+type ApiDeviceAuth struct {
+	// Code The code the user must enter at the URL, if prompted
+	Code string `json:"code"`
+
+	// ExpiresAt When the code stops being accepted
+	ExpiresAt time.Time `json:"expires_at"`
+
+	// Url The URL the user must visit to approve the request. It usually embeds the code already, in which case entering it is not needed.
+	Url string `json:"url"`
 }
 
 // ApiNext A skip to next payload
@@ -200,6 +161,12 @@ type ApiStatus struct {
 	// Buffering Whether the player is buffering
 	Buffering bool `json:"buffering"`
 
+	// ContextName The display name of the context, for example the playlist or album name, null when there is no context or the resolver did not provide a description
+	ContextName *string `json:"context_name"`
+
+	// ContextUri The URI of the context playback is coming from, null when there is no context
+	ContextUri *string `json:"context_uri"`
+
 	// DeviceId The player device ID
 	DeviceId string `json:"device_id"`
 
@@ -209,20 +176,17 @@ type ApiStatus struct {
 	// DeviceType The player device type, for example COMPUTER or SPEAKER
 	DeviceType string `json:"device_type"`
 
-	// NextTrack The upcoming track when its metadata is cached, so clients can pre-warm its name and cover art before the user skips to it. Absent when unknown.
+	// NextTrack The upcoming track when its metadata is cached (metadata.enabled), so clients can pre-warm its name and cover art before the user skips to it. Absent when unknown.
 	NextTrack *ApiTrack `json:"next_track,omitempty"`
 
 	// Paused Whether the player is paused
 	Paused bool `json:"paused"`
 
-	// PendingTrack Full metadata for the pending track when the daemon's metadata cache knows it, so clients can display it while the load is still deferred. Absent when no skip is pending or not cached yet.
-	PendingTrack *ApiTrack `json:"pending_track,omitempty"`
+	// PlayOrigin Who started the playback, "go-librespot" identifies the API as the play origin, everything else is Spotify own stuff, null when nothing has started playback yet
+	PlayOrigin *string `json:"play_origin"`
 
-	// PendingTrackUri The track selected by a not-yet-settled skip: rapid next/prev presses move the selection immediately but defer loading it until the presses stop (skip_debounce_ms), so while browsing this holds the target track URI and the track object still describes the last loaded one. Absent when no skip is pending.
-	PendingTrackUri *string `json:"pending_track_uri,omitempty"`
-
-	// PlayOrigin Who started the playback, "go-librespot" identifies the API as the play origin, everything else is Spotify own stuff
-	PlayOrigin string `json:"play_origin"`
+	// PlayOriginDeviceId The device ID that sent the command starting the playback, null when the playback was started locally through this API
+	PlayOriginDeviceId *string `json:"play_origin_device_id"`
 
 	// RepeatContext Whether the repeat context feature is enabled
 	RepeatContext bool `json:"repeat_context"`
@@ -288,7 +252,7 @@ type ApiTrack struct {
 	// Position Playback position in milliseconds
 	Position int64 `json:"position"`
 
-	// ReleaseDate Album release date; for episodes the publish time, so a client can sort a show listing
+	// ReleaseDate Album release date, empty for episodes
 	ReleaseDate string `json:"release_date"`
 
 	// SampleRate Sample rate of the decoded audio in Hz
@@ -328,9 +292,6 @@ type GetContextTracksParams struct {
 // CacheDownloadJSONRequestBody defines body for CacheDownload for application/json ContentType.
 type CacheDownloadJSONRequestBody = ApiCacheDownload
 
-// ConnectTransferJSONRequestBody defines body for ConnectTransfer for application/json ContentType.
-type ConnectTransferJSONRequestBody = ApiConnectTransfer
-
 // PlayerAddToQueueJSONRequestBody defines body for PlayerAddToQueue for application/json ContentType.
 type PlayerAddToQueueJSONRequestBody = ApiAddToQueue
 
@@ -367,17 +328,14 @@ type ServerInterface interface {
 	// (GET /)
 	GetRoot(w http.ResponseWriter, r *http.Request)
 
+	// (GET /auth/code)
+	GetAuthCode(w http.ResponseWriter, r *http.Request)
+
 	// (POST /cache/download)
 	CacheDownload(w http.ResponseWriter, r *http.Request)
 
 	// (GET /cache/snapshot)
 	GetCacheSnapshot(w http.ResponseWriter, r *http.Request, params GetCacheSnapshotParams)
-
-	// (GET /connect/devices)
-	GetConnectDevices(w http.ResponseWriter, r *http.Request)
-
-	// (POST /connect/transfer)
-	ConnectTransfer(w http.ResponseWriter, r *http.Request)
 
 	// (GET /context/tracks)
 	GetContextTracks(w http.ResponseWriter, r *http.Request, params GetContextTracksParams)
@@ -463,6 +421,20 @@ func (siw *ServerInterfaceWrapper) GetRoot(w http.ResponseWriter, r *http.Reques
 	handler.ServeHTTP(w, r)
 }
 
+// GetAuthCode operation middleware
+func (siw *ServerInterfaceWrapper) GetAuthCode(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetAuthCode(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // CacheDownload operation middleware
 func (siw *ServerInterfaceWrapper) CacheDownload(w http.ResponseWriter, r *http.Request) {
 
@@ -502,34 +474,6 @@ func (siw *ServerInterfaceWrapper) GetCacheSnapshot(w http.ResponseWriter, r *ht
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetCacheSnapshot(w, r, params)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// GetConnectDevices operation middleware
-func (siw *ServerInterfaceWrapper) GetConnectDevices(w http.ResponseWriter, r *http.Request) {
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.GetConnectDevices(w, r)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// ConnectTransfer operation middleware
-func (siw *ServerInterfaceWrapper) ConnectTransfer(w http.ResponseWriter, r *http.Request) {
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.ConnectTransfer(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -960,10 +904,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	}
 
 	m.HandleFunc("GET "+options.BaseURL+"/{$}", wrapper.GetRoot)
+	m.HandleFunc("GET "+options.BaseURL+"/auth/code", wrapper.GetAuthCode)
 	m.HandleFunc("POST "+options.BaseURL+"/cache/download", wrapper.CacheDownload)
 	m.HandleFunc("GET "+options.BaseURL+"/cache/snapshot", wrapper.GetCacheSnapshot)
-	m.HandleFunc("GET "+options.BaseURL+"/connect/devices", wrapper.GetConnectDevices)
-	m.HandleFunc("POST "+options.BaseURL+"/connect/transfer", wrapper.ConnectTransfer)
 	m.HandleFunc("GET "+options.BaseURL+"/context/tracks", wrapper.GetContextTracks)
 	m.HandleFunc("GET "+options.BaseURL+"/events", wrapper.GetEvents)
 	m.HandleFunc("POST "+options.BaseURL+"/player/add_to_queue", wrapper.PlayerAddToQueue)

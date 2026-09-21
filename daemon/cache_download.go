@@ -2,18 +2,50 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
-	"github.com/devgianlu/go-librespot/tracks"
 	"golang.org/x/exp/rand"
 )
 
 // cacheDownloadFailBreaker aborts the whole run after this many consecutive
 // failures — the signature of rate-limiting or a dropped connection.
 const cacheDownloadFailBreaker = 4
+
+// precacheTimeout bounds one pre-cache run: enumerating the context and
+// downloading everything in it, at the pace cache.download asks for.
+const precacheTimeout = 2 * time.Hour
+
+// precacheUris enumerates the tracks and episodes of a context to pre-cache, in
+// its own order. The resolver is one of its own rather than the playing track
+// list's: that one mutates its pages as it walks and is reachable only from the
+// loader lane.
+func (p *AppPlayer) precacheUris(ctx context.Context, uri string) ([]string, error) {
+	resolver, err := p.precacheResolve(ctx, uri)
+	if err != nil {
+		return nil, fmt.Errorf("failed resolving context: %w", err)
+	}
+
+	// Bounded because a context longer than the cache holds is not what
+	// pre-caching is for: its tail would only evict the head it just
+	// downloaded.
+	return enumerateContextTracks(ctx, resolver, p.precacheMaxTracks())
+}
+
+// defaultPrecacheMaxTracks caps a pre-cache when cache.download.max_tracks is
+// not set.
+const defaultPrecacheMaxTracks = 800
+
+// precacheMaxTracks returns the configured pre-cache cap.
+func (p *AppPlayer) precacheMaxTracks() int {
+	if n := p.app.cfg.Cache.Download.MaxTracks; n > 0 {
+		return n
+	}
+	return defaultPrecacheMaxTracks
+}
 
 // cacheContext downloads every track of the given context (playlist, album,
 // artist or a single track/episode) into the cache, without playing it.
@@ -26,19 +58,16 @@ const cacheDownloadFailBreaker = 4
 func (p *AppPlayer) cacheContext(ctx context.Context, uri string) {
 	log := p.app.log.WithField("uri", uri)
 
-	spotCtx, err := p.sess.Spclient().ContextResolve(ctx, uri)
-	if err != nil {
-		log.WithError(err).Warnf("failed resolving context for pre-caching")
+	if p.app.audioCache == nil {
+		log.Warnf("cannot pre-cache with the audio cache disabled")
 		return
 	}
 
-	tl, err := tracks.NewTrackListFromContext(ctx, p.app.log, p.sess.Spclient(), spotCtx)
+	all, err := p.precacheUris(ctx, uri)
 	if err != nil {
-		log.WithError(err).Warnf("failed building track list for pre-caching")
+		log.WithError(err).Warnf("failed enumerating context for pre-caching")
 		return
 	}
-
-	all := tl.AllTracks(ctx)
 	if len(all) == 0 {
 		log.Warnf("no tracks to pre-cache")
 		return
@@ -64,7 +93,7 @@ func (p *AppPlayer) cacheContext(ctx context.Context, uri string) {
 		cached     atomic.Int32
 	)
 
-	for i, pt := range all {
+	for i, trackUri := range all {
 		if ctx.Err() != nil {
 			break
 		}
@@ -96,11 +125,10 @@ func (p *AppPlayer) cacheContext(ctx context.Context, uri string) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			// The enumeration only yields tracks and episodes, so anything that
+			// does not parse here is a malformed uri off the wire.
 			spotId, err := librespot.SpotifyIdFromUri(trackUri)
 			if err != nil {
-				return
-			}
-			if spotId.Type() != librespot.SpotifyIdTypeTrack && spotId.Type() != librespot.SpotifyIdTypeEpisode {
 				return
 			}
 
@@ -114,7 +142,7 @@ func (p *AppPlayer) cacheContext(ctx context.Context, uri string) {
 			}
 			failStreak.Store(0)
 			cached.Add(1)
-		}(pt.Uri)
+		}(trackUri)
 	}
 
 	wg.Wait()

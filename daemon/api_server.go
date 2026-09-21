@@ -26,6 +26,7 @@ const timeout = 10 * time.Second
 type ApiServer interface {
 	Emit(ev *ApiEvent)
 	Receive() <-chan ApiRequest
+	SetAuthCode(auth *ApiDeviceAuth)
 	Close() error
 }
 
@@ -43,8 +44,56 @@ type ConcreteApiServer struct {
 
 	requests chan ApiRequest
 
-	clients     []*websocket.Conn
+	// authCode is the pending device authorization pairing code.
+	authCode atomic.Pointer[ApiDeviceAuth]
+
+	clients     []*wsClient
 	clientsLock sync.RWMutex
+}
+
+// wsEventQueueSize is how many events a websocket client may fall behind by
+// before the oldest ones start being dropped.
+const wsEventQueueSize = 64
+
+// wsClient is one connected event listener. Events are handed to its own writer
+// goroutine rather than written inline, so that a client which has stopped
+// reading cannot hold up whoever emitted the event — that is the player loop.
+type wsClient struct {
+	conn      *websocket.Conn
+	events    chan *ApiEvent
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *wsClient) close() {
+	c.closeOnce.Do(func() { close(c.done) })
+}
+
+// send queues an event, making room by discarding the oldest when the client is
+// too far behind: a listener that falls behind is better off converging on the
+// current state than replaying a stale backlog.
+func (c *wsClient) send(log librespot.Logger, ev *ApiEvent) bool {
+	select {
+	case <-c.done:
+		return false
+	default:
+	}
+
+	for range 2 {
+		select {
+		case c.events <- ev:
+			return true
+		default:
+		}
+
+		select {
+		case <-c.events:
+			log.Warnf("websocket client is not keeping up, dropping an event")
+		default:
+		}
+	}
+
+	return false
 }
 
 var (
@@ -77,13 +126,23 @@ const (
 	ApiRequestTypeAddToQueue          ApiRequestType = "add_to_queue"
 	ApiRequestTypeToken               ApiRequestType = "token"
 	ApiRequestSetDeviceName           ApiRequestType = "set_device_name"
-	ApiRequestTypeCacheDownload       ApiRequestType = "cache_download"
-	ApiRequestTypeCacheSnapshot       ApiRequestType = "cache_snapshot"
 	ApiRequestTypeReopenOutput        ApiRequestType = "reopen_output"
 	ApiRequestTypeContextTracks       ApiRequestType = "context_tracks"
-	ApiRequestTypeConnectDevices      ApiRequestType = "connect_devices"
-	ApiRequestTypeConnectTransfer     ApiRequestType = "connect_transfer"
+	ApiRequestTypeCacheDownload       ApiRequestType = "cache_download"
+	ApiRequestTypeCacheSnapshot       ApiRequestType = "cache_snapshot"
 )
+
+// ApiRequestDataContextTracks carries the uri query parameter of the context
+// listing request; the spec generates payloads only for request bodies.
+type ApiRequestDataContextTracks struct {
+	Uri string
+}
+
+// ApiRequestDataCacheSnapshot carries the uri query parameter of the snapshot
+// request, for the same reason.
+type ApiRequestDataCacheSnapshot struct {
+	Uri string
+}
 
 type ApiEventType string
 
@@ -129,24 +188,6 @@ func NewApiRequest(t ApiRequestType, data any) (req ApiRequest, wait func(contex
 		}
 	}
 	return
-}
-
-// The request and response payloads are generated from api-spec.yml.
-// Only the payloads the spec cannot describe are declared here.
-
-// ApiRequestDataContextTracks, ApiRequestDataCacheDownload and
-// ApiRequestDataCacheSnapshot carry query/body parameters into the request
-// channel; their wire shapes are the generated models.
-type ApiRequestDataContextTracks struct {
-	Uri string `json:"uri"`
-}
-
-type ApiRequestDataCacheDownload struct {
-	Uri string `json:"uri"`
-}
-
-type ApiRequestDataCacheSnapshot struct {
-	Uri string `json:"uri"`
 }
 
 type apiResponse struct {
@@ -362,6 +403,8 @@ func (s *StubApiServer) Receive() <-chan ApiRequest {
 	return make(<-chan ApiRequest)
 }
 
+func (s *StubApiServer) SetAuthCode(*ApiDeviceAuth) {}
+
 func (s *StubApiServer) Close() error {
 	return nil
 }
@@ -387,6 +430,9 @@ func (s *ConcreteApiServer) handleRequest(req ApiRequest, w http.ResponseWriter)
 			return
 		case errors.Is(resp.err, ErrTooManyRequests):
 			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		case errors.Is(resp.err, ErrSuperseded), errors.Is(resp.err, ErrLoaderBusy):
+			w.WriteHeader(http.StatusConflict)
 			return
 		case errors.Is(resp.err, ErrBadRequest):
 			w.WriteHeader(http.StatusBadRequest)
@@ -436,23 +482,19 @@ func (s *ConcreteApiServer) GetStatus(w http.ResponseWriter, _ *http.Request) {
 	s.handleRequest(ApiRequest{Type: ApiRequestTypeStatus}, w)
 }
 
-func (s *ConcreteApiServer) GetConnectDevices(w http.ResponseWriter, _ *http.Request) {
-	s.handleRequest(ApiRequest{Type: ApiRequestTypeConnectDevices}, w)
+func (s *ConcreteApiServer) GetAuthCode(w http.ResponseWriter, _ *http.Request) {
+	auth := s.authCode.Load()
+	if auth == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(auth)
 }
 
-func (s *ConcreteApiServer) ConnectTransfer(w http.ResponseWriter, r *http.Request) {
-	var data ApiConnectTransfer
-	if err := jsonDecode(r, &data); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	if len(data.DeviceId) == 0 {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	s.handleRequest(ApiRequest{Type: ApiRequestTypeConnectTransfer, Data: data}, w)
+func (s *ConcreteApiServer) GetToken(w http.ResponseWriter, _ *http.Request) {
+	s.handleRequest(ApiRequest{Type: ApiRequestTypeToken}, w)
 }
 
 func (s *ConcreteApiServer) GetContextTracks(w http.ResponseWriter, _ *http.Request, params GetContextTracksParams) {
@@ -466,15 +508,11 @@ func (s *ConcreteApiServer) CacheDownload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	s.handleRequest(ApiRequest{Type: ApiRequestTypeCacheDownload, Data: ApiRequestDataCacheDownload{Uri: data.Uri}}, w)
+	s.handleRequest(ApiRequest{Type: ApiRequestTypeCacheDownload, Data: data}, w)
 }
 
 func (s *ConcreteApiServer) GetCacheSnapshot(w http.ResponseWriter, _ *http.Request, params GetCacheSnapshotParams) {
 	s.handleRequest(ApiRequest{Type: ApiRequestTypeCacheSnapshot, Data: ApiRequestDataCacheSnapshot{Uri: params.Uri}}, w)
-}
-
-func (s *ConcreteApiServer) GetToken(w http.ResponseWriter, _ *http.Request) {
-	s.handleRequest(ApiRequest{Type: ApiRequestTypeToken}, w)
 }
 
 func (s *ConcreteApiServer) PlayerResume(w http.ResponseWriter, _ *http.Request) {
@@ -643,10 +681,18 @@ func (s *ConcreteApiServer) GetEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// add the client to the list
+	client := &wsClient{
+		conn:   c,
+		events: make(chan *ApiEvent, wsEventQueueSize),
+		done:   make(chan struct{}),
+	}
+
 	s.clientsLock.Lock()
-	s.clients = append(s.clients, c)
+	s.clients = append(s.clients, client)
 	s.clientsLock.Unlock()
+
+	go s.writeEvents(client)
+	defer client.close()
 
 	s.log.Debugf("new websocket client")
 
@@ -660,7 +706,7 @@ func (s *ConcreteApiServer) GetEvents(w http.ResponseWriter, r *http.Request) {
 			// remove the client from the list
 			s.clientsLock.Lock()
 			for i, cc := range s.clients {
-				if cc == c {
+				if cc == client {
 					s.clients = append(s.clients[:i], s.clients[i+1:]...)
 					break
 				}
@@ -702,12 +748,26 @@ func (s *ConcreteApiServer) Emit(ev *ApiEvent) {
 	s.log.Tracef("emitting websocket event: %s", ev.Type)
 
 	for _, client := range s.clients {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		err := wsjson.Write(ctx, client, ev)
-		cancel()
-		if err != nil {
-			// purposely do not propagate this to the caller
-			s.log.WithError(err).Error("failed communicating with websocket client")
+		client.send(s.log, ev)
+	}
+}
+
+// writeEvents delivers one client's events in order. One goroutine per client
+// rather than one per event, because listeners rely on the order they arrive in:
+// will_play before metadata, paused before playing.
+func (s *ConcreteApiServer) writeEvents(client *wsClient) {
+	for {
+		select {
+		case <-client.done:
+			return
+		case ev := <-client.events:
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			err := wsjson.Write(ctx, client.conn, ev)
+			cancel()
+			if err != nil && !s.close.Load() {
+				// purposely do not propagate this to the caller
+				s.log.WithError(err).Error("failed communicating with websocket client")
+			}
 		}
 	}
 }
@@ -716,13 +776,18 @@ func (s *ConcreteApiServer) Receive() <-chan ApiRequest {
 	return s.requests
 }
 
+func (s *ConcreteApiServer) SetAuthCode(auth *ApiDeviceAuth) {
+	s.authCode.Store(auth)
+}
+
 func (s *ConcreteApiServer) Close() error {
 	s.close.Store(true)
 
 	// close all websocket clients
 	s.clientsLock.RLock()
 	for _, client := range s.clients {
-		_ = client.Close(websocket.StatusGoingAway, "")
+		client.close()
+		_ = client.conn.Close(websocket.StatusGoingAway, "")
 	}
 	s.clientsLock.RUnlock()
 

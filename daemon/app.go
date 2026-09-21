@@ -17,8 +17,11 @@ import (
 	"github.com/devgianlu/go-librespot/mpris"
 	"github.com/devgianlu/go-librespot/player"
 	"github.com/devgianlu/go-librespot/playplay"
+	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
 	devicespb "github.com/devgianlu/go-librespot/proto/spotify/connectstate/devices"
 	"github.com/devgianlu/go-librespot/session"
+	"github.com/devgianlu/go-librespot/spclient"
+	"github.com/devgianlu/go-librespot/tracks"
 	"github.com/devgianlu/go-librespot/zeroconf"
 	"golang.org/x/exp/rand"
 )
@@ -44,6 +47,20 @@ type App struct {
 	logoutCh chan *AppPlayer
 
 	audioCache *cache.Cache
+
+	// metaCache and contextLists back the opt-in metadata features. They live
+	// here rather than on the player so that a session swap (logout, a new
+	// zeroconf user) keeps what was fetched. Both are nil when metadata.enabled
+	// is false, and every helper treats a nil cache as a no-op.
+	metaCache    *trackMetaCache
+	contextLists *contextListCache
+
+	// stateMu guards state and the store behind it. Two AppPlayers overlap
+	// briefly whenever a zeroconf session is replaced, and volume changes are
+	// written back from off the player loop.
+	stateMu   sync.Mutex
+	saving    bool
+	saveDirty bool
 
 	closed bool
 }
@@ -138,6 +155,11 @@ func New(opts *Options) (*App, error) {
 		}
 	}
 
+	if app.cfg.Metadata.Enabled {
+		app.metaCache = newTrackMetaCache()
+		app.contextLists = newContextListCache()
+	}
+
 	return app, nil
 }
 
@@ -206,10 +228,45 @@ func (app *App) Close() error {
 }
 
 func (app *App) persistState() error {
+	app.stateMu.Lock()
+	defer app.stateMu.Unlock()
+
 	if err := app.stateStore.Save(app.state); err != nil {
 		return fmt.Errorf("persisting state: %w", err)
 	}
 	return nil
+}
+
+// requestPersist writes the state out off the caller's goroutine, coalescing
+// repeated requests into the one save still to come. Saving is a temp file plus
+// a rename, slow enough on the hardware this runs on to be worth keeping away
+// from the player loop.
+func (app *App) requestPersist() {
+	app.stateMu.Lock()
+	app.saveDirty = true
+	if app.saving {
+		app.stateMu.Unlock()
+		return
+	}
+	app.saving = true
+	app.stateMu.Unlock()
+
+	go func() {
+		for {
+			app.stateMu.Lock()
+			if !app.saveDirty {
+				app.saving = false
+				app.stateMu.Unlock()
+				return
+			}
+			app.saveDirty = false
+			app.stateMu.Unlock()
+
+			if err := app.persistState(); err != nil {
+				app.log.WithError(err).Error("failed persisting state")
+			}
+		}
+	}()
 }
 
 func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err error) {
@@ -221,7 +278,6 @@ func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err 
 		cancel:          playerCancel,
 		stop:            make(chan struct{}, 1),
 		logout:          app.logoutCh,
-		countryCode:     new(string),
 		volumeUpdate:    make(chan float32, 1),
 		playbackReadyCh: make(chan struct{}),
 	}
@@ -235,14 +291,14 @@ func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err 
 	appPlayer.prefetchTimer = time.NewTimer(math.MaxInt64)
 	appPlayer.prefetchTimer.Stop()
 
-	appPlayer.settleTimer = time.NewTimer(math.MaxInt64)
-	appPlayer.settleTimer.Stop()
-
 	appPlayer.sleepTimer = time.NewTimer(math.MaxInt64)
 	appPlayer.sleepTimer.Stop()
 
-	appPlayer.metaCache = newTrackMetaCache()
-	appPlayer.contextLists = newContextListCache()
+	appPlayer.stateTimer = time.NewTimer(math.MaxInt64)
+	appPlayer.stateTimer.Stop()
+
+	appPlayer.metaPrefetchTimer = time.NewTimer(math.MaxInt64)
+	appPlayer.metaPrefetchTimer.Stop()
 
 	if appPlayer.sess, err = session.NewSessionFromOptions(ctx, &session.Options{
 		Log:         app.log,
@@ -258,6 +314,17 @@ func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err 
 	}
 
 	appPlayer.initState()
+	appPlayer.loader = newLoaderLane(app.log)
+	appPlayer.statePush = newStatePushLane(app.log, appPlayer.sess.Spclient(), app.deviceId)
+	if app.metaCache != nil {
+		appPlayer.meta = newMetaFetcher(app.log, app.metaCache, appPlayer.sess.Spclient())
+	}
+	appPlayer.precacheResolve = func(ctx context.Context, uri string) (tracks.ContextResolver, error) {
+		// A context of its own, never the playing one: the resolver behind a
+		// track list mutates its pages as it walks, and is reachable only from
+		// the loader lane.
+		return spclient.NewContextResolver(ctx, app.log, appPlayer.sess.Spclient(), &connectpb.Context{Uri: uri})
+	}
 
 	if appPlayer.player, err = player.NewPlayer(&player.Options{
 		Spclient: appPlayer.sess.Spclient(),
@@ -275,7 +342,7 @@ func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err 
 
 		CrossfadeDuration: time.Duration(app.cfg.CrossfadeDuration) * time.Millisecond,
 
-		CountryCode: appPlayer.countryCode,
+		CountryCode: appPlayer.CountryCode,
 
 		AudioBackend:              app.cfg.AudioBackend,
 		AudioBackendRuntimeSocket: app.cfg.AudioBackendRuntimeSocket,
@@ -324,7 +391,20 @@ func (app *App) runInteractive(ctx context.Context, callbackPort int) error {
 }
 
 func (app *App) runDeviceAuth(ctx context.Context) error {
-	return app.withCredentials(ctx, session.DeviceAuthCredentials{})
+	return app.withCredentials(ctx, session.DeviceAuthCredentials{
+		OnCode: func(code *session.DeviceAuthCode) {
+			if code == nil {
+				app.server.SetAuthCode(nil)
+				return
+			}
+
+			app.server.SetAuthCode(&ApiDeviceAuth{
+				Url:       code.VerificationUrl,
+				Code:      code.UserCode,
+				ExpiresAt: code.ExpiresAt,
+			})
+		},
+	})
 }
 
 func (app *App) withCredentials(ctx context.Context, creds any) (err error) {
@@ -340,8 +420,10 @@ func (app *App) withCredentials(ctx context.Context, creds any) (err error) {
 				return nil, err
 			}
 
+			app.stateMu.Lock()
 			app.state.Credentials.Username = appPlayer.sess.Username()
 			app.state.Credentials.Data = appPlayer.sess.StoredCredentials()
+			app.stateMu.Unlock()
 
 			if err = app.persistState(); err != nil {
 				return nil, err
@@ -394,8 +476,36 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 			panic("zeroconf is disabled and no credentials are present")
 		}
 
+		// Nothing else owns the player in this mode: App.Close closes the API
+		// server, mpris and zeroconf but never the AppPlayer, so on
+		// SIGINT/SIGTERM Run below never returns and the process stays up.
+		// Stop the player on cancellation, mirroring what the zeroconf branch
+		// does with setSession(nil) when ctx is done.
+		//
+		// The same goroutine drains logoutCh, which only the zeroconf branch
+		// reads today. Without a reader, loseSession parks the player loop for
+		// ever on its send and the daemon lives on with a dead session. There
+		// is no other session to swap in here, so the daemon stops and reports
+		// the loss rather than pretending to be alive.
+		sessionLost := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+			case <-app.logoutCh:
+				close(sessionLost)
+			}
+
+			appPlayer.Close()
+		}()
+
 		appPlayer.Run(app.server.Receive(), app.mpris.Receive())
-		return nil
+
+		select {
+		case <-sessionLost:
+			return errors.New("session lost and cannot be restored without zeroconf")
+		default:
+			return nil
+		}
 	}
 
 	if err := app.resolver.FetchAll(ctx); err != nil {
@@ -561,8 +671,10 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 		}
 
 		if app.cfg.Credentials.Zeroconf.PersistCredentials {
+			app.stateMu.Lock()
 			app.state.Credentials.Username = newAppPlayer.sess.Username()
 			app.state.Credentials.Data = newAppPlayer.sess.StoredCredentials()
+			app.stateMu.Unlock()
 
 			if err := app.persistState(); err != nil {
 				app.log.WithError(err).Errorf("failed persisting zeroconf credentials")

@@ -86,8 +86,15 @@ type cliConfig struct {
 			Concurrency int `koanf:"concurrency"`
 			MinDelayMs  int `koanf:"min_delay_ms"`
 			JitterMs    int `koanf:"jitter_ms"`
+			MaxTracks   int `koanf:"max_tracks"`
 		} `koanf:"download"`
 	} `koanf:"cache"`
+
+	Metadata struct {
+		Enabled      bool `koanf:"enabled"`
+		ContextSweep bool `koanf:"context_sweep"`
+		MaxTracks    int  `koanf:"max_tracks"`
+	} `koanf:"metadata"`
 
 	Credentials struct {
 		Type        string `koanf:"type"`
@@ -160,6 +167,10 @@ func (c *cliConfig) toDaemonConfig() *daemon.Config {
 	dc.Cache.Download.Concurrency = c.Cache.Download.Concurrency
 	dc.Cache.Download.MinDelay = time.Duration(c.Cache.Download.MinDelayMs) * time.Millisecond
 	dc.Cache.Download.Jitter = time.Duration(c.Cache.Download.JitterMs) * time.Millisecond
+	dc.Cache.Download.MaxTracks = c.Cache.Download.MaxTracks
+	dc.Metadata.Enabled = c.Metadata.Enabled
+	dc.Metadata.ContextSweep = c.Metadata.ContextSweep
+	dc.Metadata.MaxTracks = c.Metadata.MaxTracks
 	dc.Credentials.Type = c.Credentials.Type
 	dc.Credentials.Interactive.CallbackPort = c.Credentials.Interactive.CallbackPort
 	dc.Credentials.SpotifyToken.Username = c.Credentials.SpotifyToken.Username
@@ -216,7 +227,7 @@ func loadCLIConfig(cfg *cliConfig) error {
 		"volume_steps":   100,
 		"initial_volume": 100,
 
-		"skip_debounce_ms": 800,
+		"skip_debounce_ms": 600,
 
 		"credentials.type": "zeroconf",
 
@@ -226,6 +237,11 @@ func loadCLIConfig(cfg *cliConfig) error {
 		"cache.download.concurrency":  2,
 		"cache.download.min_delay_ms": 1500,
 		"cache.download.jitter_ms":    1000,
+		"cache.download.max_tracks":   800,
+
+		"metadata.enabled":       false,
+		"metadata.context_sweep": false,
+		"metadata.max_tracks":    800,
 
 		"zeroconf_backend": "builtin",
 
@@ -290,10 +306,14 @@ func loadCLIConfig(cfg *cliConfig) error {
 }
 
 func defaultAudioBackend() string {
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		return "wasapi"
+	case "darwin":
+		return "audio-toolbox"
+	default:
+		return "alsa"
 	}
-	return "alsa"
 }
 
 // parseSize parses a human-readable size string such as "1GB", "500MB" or a

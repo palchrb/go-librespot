@@ -22,7 +22,7 @@
 ## Features
 
 - 🎵 **Spotify Connect** — show up as a speaker in the Spotify app and stream to it from any device on your network (Spotify Premium required).
-- 🔊 **Multiple audio backends** — ALSA, PulseAudio, WASAPI on Windows, or a raw named pipe for custom routing.
+- 🔊 **Multiple audio backends** — ALSA, PulseAudio, AudioToolbox on macOS, WASAPI on Windows, or a raw named pipe for custom routing.
 - 📊 **Loudness normalization** — Spotify-standard −14 LUFS (ITU-R BS.1770) with configurable pregain.
 - 🔀 **Crossfade** — configurable overlap between consecutive tracks.
 - 🎙️ **Podcast resume** — episodes pick up where you left off, and progress syncs back to your other devices.
@@ -192,6 +192,9 @@ port, so unlike interactive mode there is no redirect URL to copy around when go
 3. Open the link it logs, or go to [spotify.com/pair](https://spotify.com/pair) and enter the code it prints
 4. Approve the request; the daemon picks it up automatically and stores the credentials
 
+With the API server enabled, the same link and code are also served at `GET /auth/code` for as long as the daemon is
+waiting, so a frontend can show them instead of asking the user to read the logs.
+
 ### API server
 
 Optionally, an API server can be started to control and monitor the player. To enable this feature, add the following to
@@ -226,6 +229,7 @@ cache:
     concurrency: 2 # How many tracks to download at once
     min_delay_ms: 1500 # Minimum delay between starting each track download
     jitter_ms: 1000 # Additional random delay (0..jitter_ms) added to min_delay_ms
+    max_tracks: 800 # Maximum number of tracks of a context to pre-cache
 ```
 
 When the cache is enabled, a context can also be pre-cached on demand via the API server: `POST /cache/download` with
@@ -237,6 +241,22 @@ To decide when a playlist needs re-caching, `GET /cache/snapshot?uri=spotify:pla
 `snapshot_id` (revision) and track count in a single call. A client can store the last seen `snapshot_id` and only
 trigger a new `POST /cache/download` when it changes. Only playlists have a snapshot; for other URIs `snapshot_id` is
 `null`.
+
+### Track metadata cache
+
+Optionally, the daemon can cache track metadata (name, artists, cover art) in memory and fetch it — via the same
+internal API playback uses, not the rate-limited public Web API — for the tracks around the playback position. This
+enables a `next_track` field in `GET /status` and a `GET /context/tracks?uri=...` endpoint that lists any playable
+context (playlist, album, artist) in order with metadata, so a client can render a browsable song list and start any
+entry via `POST /player/play` with `skip_to_uri`. Everything is opt-in and disabled by default: a headless speaker has
+no use for metadata beyond the playing track and should not pay network requests for it.
+
+```yaml
+metadata:
+  enabled: false # Cache + fetch metadata around the playback position; enables next_track and /context/tracks
+  context_sweep: false # Also resolve metadata for the whole context when one starts playing (requires enabled)
+  max_tracks: 800 # Maximum number of tracks of a context to enumerate and sweep
+```
 
 ### Volume synchronization
 
@@ -282,7 +302,7 @@ log_disable_timestamp: false # Whether to disable timestamps in log output
 device_id: '' # Spotify device ID (auto-generated)
 device_name: '' # Spotify device name
 device_type: computer # Spotify device type (icon)
-audio_backend: alsa # Audio backend to use (alsa, pipe, pulseaudio, audio-toolbox, wasapi). Default is alsa, or wasapi on Windows.
+audio_backend: alsa # Default: audio-toolbox on macOS, wasapi on Windows, alsa elsewhere. Can also use pipe or pulseaudio.
 audio_backend_runtime_socket: '' # Audio backends' runtime socket to use, if backend is pulseaudio
 audio_device: default # ALSA audio device to use for playback
 mixer_device: '' # ALSA mixer device for volume synchronization 
@@ -294,7 +314,7 @@ audio_output_pipe_format: s16le # Audio output pipe format (s16le, s32le, f32le)
 audio_output_pipe_wait_for_reader: false # Whether to wait for a reader to connect to the FIFO before starting playback (see below)
 bitrate: 160 # Playback bitrate (96, 160, 320)
 crossfade_duration: 0 # Crossfade duration between tracks in milliseconds (0 to disable)
-skip_debounce_ms: 800 # Coalesce rapid next/prev presses; the selected track loads once presses stop (0 to disable)
+skip_debounce_ms: 600 # Coalesce rapid next/prev presses; the selected track loads once presses stop (0 to disable)
 volume_steps: 100 # Volume steps count
 initial_volume: 100 # Initial volume in steps (not applied to the mixer device)
 ignore_last_volume: false # Whether to ignore the last saved volume and always use initial_volume

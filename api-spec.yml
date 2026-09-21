@@ -63,9 +63,7 @@ components:
           description: Duration in milliseconds
           type: integer
         release_date:
-          description: >-
-            Album release date; for episodes the publish time, so a client can
-            sort a show listing
+          description: Album release date, empty for episodes
           type: string
         track_number:
           description: Track number within the disc, zero for episodes
@@ -114,6 +112,9 @@ components:
         - device_type
         - device_name
         - play_origin
+        - play_origin_device_id
+        - context_uri
+        - context_name
         - stopped
         - paused
         - buffering
@@ -139,8 +140,29 @@ components:
         play_origin:
           description: >-
             Who started the playback, "go-librespot" identifies the API as the
-            play origin, everything else is Spotify own stuff
+            play origin, everything else is Spotify own stuff, null when
+            nothing has started playback yet
           type: string
+          nullable: true
+        play_origin_device_id:
+          description: >-
+            The device ID that sent the command starting the playback, null
+            when the playback was started locally through this API
+          type: string
+          nullable: true
+        context_uri:
+          description: >-
+            The URI of the context playback is coming from, null when there is
+            no context
+          type: string
+          nullable: true
+        context_name:
+          description: >-
+            The display name of the context, for example the playlist or album
+            name, null when there is no context or the resolver did not provide
+            a description
+          type: string
+          nullable: true
         stopped:
           description: Whether the player is stopped
           type: boolean
@@ -172,30 +194,11 @@ components:
           allOf:
             - $ref: '#/components/schemas/track'
           nullable: true
-        pending_track_uri:
-          description: >-
-            The track selected by a not-yet-settled skip: rapid next/prev
-            presses move the selection immediately but defer loading it until
-            the presses stop (skip_debounce_ms), so while browsing this holds
-            the target track URI and the track object still describes the last
-            loaded one. Absent when no skip is pending.
-          type: string
-          nullable: true
-          x-omitempty: true
-        pending_track:
-          description: >-
-            Full metadata for the pending track when the daemon's metadata
-            cache knows it, so clients can display it while the load is still
-            deferred. Absent when no skip is pending or not cached yet.
-          allOf:
-            - $ref: '#/components/schemas/track'
-          nullable: true
-          x-omitempty: true
         next_track:
           description: >-
-            The upcoming track when its metadata is cached, so clients can
-            pre-warm its name and cover art before the user skips to it.
-            Absent when unknown.
+            The upcoming track when its metadata is cached (metadata.enabled),
+            so clients can pre-warm its name and cover art before the user
+            skips to it. Absent when unknown.
           allOf:
             - $ref: '#/components/schemas/track'
           nullable: true
@@ -234,7 +237,8 @@ components:
           description: Number of track entries
           type: integer
         cached:
-          description: Entries with full metadata; poll again while cached < length
+          description: >-
+            Entries with full metadata; poll again while cached < length
           type: integer
         tracks:
           type: array
@@ -265,83 +269,6 @@ components:
           description: Number of tracks in the playlist, when available
           type: integer
           nullable: true
-    connectDevice:
-      x-go-name: ApiConnectDevice
-      description: A Spotify Connect device in the account's device cluster
-      type: object
-      required: [ id, name, type, brand, model, active, self, can_play, volume, volume_steps ]
-      properties:
-        id:
-          description: The Spotify Connect device ID
-          type: string
-        name:
-          description: The device name
-          type: string
-        type:
-          description: The device type, for example COMPUTER or SPEAKER
-          type: string
-        brand:
-          description: The device brand, empty when not reported
-          type: string
-        model:
-          description: The device model, empty when not reported
-          type: string
-        active:
-          description: Whether this device currently owns playback
-          type: boolean
-        self:
-          description: Whether this device is the daemon itself
-          type: boolean
-        can_play:
-          description: Whether the device can accept playback
-          type: boolean
-        volume:
-          description: The device volume, from 0 to 65535
-          type: integer
-          format: uint32
-        volume_steps:
-          description: The device's volume step count, 0 when not reported
-          type: integer
-          format: int32
-    connectDevices:
-      x-go-name: ApiConnectDevices
-      description: The account's Spotify Connect device cluster
-      type: object
-      required: [ active_device_id, updated_at, devices ]
-      properties:
-        active_device_id:
-          description: Device ID that owns playback, or null when nothing is active
-          type: string
-          nullable: true
-        updated_at:
-          description: >-
-            When the cluster was last seen, as a unix millisecond timestamp;
-            null when no cluster has been received yet. Cluster pushes only
-            arrive on change, so an old timestamp on a quiet account is
-            normal, not an error.
-          type: integer
-          format: int64
-          nullable: true
-        devices:
-          type: array
-          items:
-            $ref: '#/components/schemas/connectDevice'
-    connectTransfer:
-      x-go-name: ApiConnectTransfer
-      description: A transfer playback payload
-      type: object
-      required: [ device_id ]
-      properties:
-        device_id:
-          description: The Spotify Connect device ID to move playback to
-          type: string
-        restore_paused:
-          description: >-
-            What the target should do with a paused session: "restore" keeps
-            it paused, "resume" starts playing. Empty leaves it to the
-            service's default.
-          type: string
-          x-go-type-skip-optional-pointer: true
     root:
       x-go-name: ApiRoot
       description: API reachability and playback readiness
@@ -376,6 +303,24 @@ components:
         token:
           description: The access token
           type: string
+    deviceAuth:
+      x-go-name: ApiDeviceAuth
+      description: The pairing details of an in-flight device authorization flow
+      type: object
+      required: [ url, code, expires_at ]
+      properties:
+        url:
+          description: >-
+            The URL the user must visit to approve the request. It usually
+            embeds the code already, in which case entering it is not needed.
+          type: string
+        code:
+          description: The code the user must enter at the URL, if prompted
+          type: string
+        expires_at:
+          description: When the code stops being accepted
+          type: string
+          format: date-time
     play:
       x-go-name: ApiPlay
       description: An initiate playback payload
@@ -538,6 +483,23 @@ paths:
                 $ref: '#/components/schemas/token'
         204:
           description: No active session
+  /auth/code:
+    get:
+      operationId: getAuthCode
+      description: >-
+        Returns the pairing URL and code of the device authorization flow the
+        daemon is waiting on, so a UI can show them instead of having the user
+        read the logs. Only the `device_auth` credentials type ever has one, and
+        only until the user approves the request or the code expires.
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/deviceAuth'
+        204:
+          description: No device authorization flow is waiting for the user
   /events:
     get:
       operationId: getEvents
@@ -563,26 +525,6 @@ paths:
           description: Successful response
         400:
           description: The name is missing or empty
-  /player/play:
-    post:
-      operationId: playerPlay
-      description: >-
-        Starts playing new content. To start a context shuffled (on a random
-        track), enable shuffle first via /player/shuffle_context and then call
-        this. Calling /player/shuffle_context after play only shuffles the
-        upcoming queue and keeps the current (first) track, so play alone (or
-        shuffle after play) always begins on the context's first track.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/play'
-      responses:
-        200:
-          description: Successful response
-        400:
-          description: The uri is missing or empty
   /context/tracks:
     get:
       operationId: getContextTracks
@@ -595,11 +537,15 @@ paths:
         an unknown context starts a background enumeration and returns
         ready=false with an empty listing. Once ready is true, entries whose
         metadata is not cached yet have a null track while a background sweep
-        fills them in. Poll until ready is true and cached == length.
+        fills them in. Poll until ready is true and cached == length. Clients
+        can render a browsable song list from this and start any entry via
+        POST /player/play with the context uri and the track as skip_to_uri.
 
         Tracks and episodes are both listed, so shows enumerate to their
-        episodes. Audiobook chapters are wired but untested. Long contexts are
-        truncated to 800 entries. Listings are reused for five minutes.
+        episodes. Long contexts are truncated to metadata.max_tracks. Listings
+        are reused for five minutes, so an edit made to a playlist within that
+        window is not reflected. Requires metadata.enabled; responds 404
+        otherwise.
       parameters:
         - name: uri
           in: query
@@ -614,6 +560,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contextTracks'
+        400:
+          description: The uri does not name a listable context
+        404:
+          description: The metadata cache is disabled
   /cache/download:
     post:
       operationId: cacheDownload
@@ -653,57 +603,28 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/cacheSnapshot'
-  /connect/devices:
-    get:
-      operationId: getConnectDevices
-      description: >-
-        List the account's Spotify Connect devices from the device cluster the
-        daemon receives over its own Spotify connection — no Web API involved,
-        and the request never triggers any network call. The listing reflects
-        the most recent cluster the daemon has seen; right after startup or a
-        reconnect it may contain only this device until Spotify pushes an
-        update. Devices linger after going offline (the cluster only shrinks
-        on explicit disappearance), so presence in the list does not guarantee
-        reachability.
-      responses:
-        200:
-          description: Successful response
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/connectDevices'
-        204:
-          description: No active session
-  /connect/transfer:
+        400:
+          description: The uri is not a valid Spotify URI
+  /player/play:
     post:
-      operationId: connectTransfer
+      operationId: playerPlay
       description: >-
-        Move the current playback session to another device on the account,
-        via the internal connect-state API. The target must appear in
-        /connect/devices, must not be this device, and this device must be
-        the active player. A 200 means Spotify accepted the request; the
-        transfer completing is signalled by the usual inactive/stopped event
-        sequence, and a client should apply its own timeout for targets that
-        turn out to be offline.
+        Starts playing new content. To start a context shuffled (on a random
+        track), enable shuffle first via /player/shuffle_context and then call
+        this. Calling /player/shuffle_context after play only shuffles the
+        upcoming queue and keeps the current (first) track, so play alone (or
+        shuffle after play) always begins on the context's first track.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/connectTransfer'
+              $ref: '#/components/schemas/play'
       responses:
         200:
-          description: Transfer request accepted by Spotify
-        204:
-          description: No active session
+          description: Successful response
         400:
-          description: >-
-            The device_id is missing, is this device, or this device is not
-            the active player
-        404:
-          description: The device is not present in the cluster
-        429:
-          description: Spotify rate-limited the transfer request
+          description: The uri is missing or empty
   /player/resume:
     post:
       operationId: playerResume
