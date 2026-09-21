@@ -621,6 +621,23 @@ func (p *AppPlayer) apiNextTrack() *ApiTrack {
 	return p.newApiResponseStatusMedia(media, 0)
 }
 
+// apiPendingTrack describes the track being loaded, while a load is
+// outstanding and its metadata is cached. The status track is nil until a load
+// lands, and a burst of skips holds the load back on purpose, so this is what
+// tells a client where the pointer is in the meantime. Nil when nothing is
+// loading or the metadata is unknown. Runs on the Run goroutine.
+func (p *AppPlayer) apiPendingTrack() *ApiTrack {
+	if !p.loadInFlight || p.prodInfo == nil {
+		return nil
+	}
+
+	media := p.app.metaCache.get(p.state.player.Track.GetUri())
+	if media == nil {
+		return nil
+	}
+	return p.newApiResponseStatusMedia(media, 0)
+}
+
 // contextTracksResponse describes a context listing from what the caches hold:
 // ready reports whether the track list itself is enumerated, cached how many
 // of those tracks carry metadata. Runs on the Run goroutine.

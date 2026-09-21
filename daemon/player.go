@@ -590,6 +590,7 @@ func (p *AppPlayer) handleApiRequest(req ApiRequest) (any, error) {
 		}
 
 		resp.NextTrack = p.apiNextTrack()
+		resp.PendingTrack = p.apiPendingTrack()
 
 		return resp, nil
 	case ApiRequestTypeContextTracks:

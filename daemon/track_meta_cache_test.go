@@ -656,3 +656,27 @@ func TestStatusNextTrack(t *testing.T) {
 	require.Equal(t, "next", next.Name)
 	require.Equal(t, trackUri(0x02), next.Uri)
 }
+
+// While a load is outstanding the status track is nil, and a burst of skips
+// holds the load back on purpose, so the pending track is what names where the
+// pointer is. It costs nothing while the cache is cold, like next_track.
+func TestStatusPendingTrack(t *testing.T) {
+	disabled := &AppPlayer{app: &App{cfg: &Config{}}, prodInfo: &ProductInfo{}, state: &State{}, loadInFlight: true}
+	disabled.state.reset()
+	disabled.state.player.Track = provided(trackUri(0x03))
+	require.Nil(t, disabled.apiPendingTrack())
+
+	p := newMetaTestPlayer(t, echoMetadata, nil)
+	p.state.player.Track = provided(trackUri(0x03))
+	p.app.metaCache.put(trackUri(0x03), librespot.NewMediaFromTrack(metaTrack(gid(0x03), "pending")))
+	require.Nil(t, p.apiPendingTrack(), "nothing loading")
+
+	p.loadInFlight = true
+	pending := p.apiPendingTrack()
+	require.NotNil(t, pending)
+	require.Equal(t, "pending", pending.Name)
+	require.Equal(t, trackUri(0x03), pending.Uri)
+
+	p.state.player.Track = provided(trackUri(0x04))
+	require.Nil(t, p.apiPendingTrack(), "loading, but not cached yet")
+}
